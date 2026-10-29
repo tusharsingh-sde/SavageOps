@@ -1,0 +1,17 @@
+{
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "service": "dummy-app"
+      },
+      "annotations": {
+        "summary": "5xx rate above 20% on /api/checkout"
+      },
+      "startsAt": "2026-10-28T13:30:00Z",
+      "fingerprint": "checkout-keyerror-500"
+    }
+  ]
+}

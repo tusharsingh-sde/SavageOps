@@ -1,23 +1,38 @@
-"""FastAPI application entry point for SavageOps."""
+"""FastAPI application entry point for SavageOps with Sentinel, Watchdog, and Lifespan."""
+
+import asyncio
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from langgraph.types import Command
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.auth import require_admin
+from app.config import POLL_ENABLED
 from app.db import get_incident
 from app.graph import graph
 from app.health import router as health_router
-from app.webhook import router as incident_router
+from app.sentinel.poller import poll_loop
+from app.sentinel.webhook import router as sentinel_webhook_router
+from app.watchdog import watchdog_loop
 
-app = FastAPI(title="SavageOps")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage lifecycle of background Sentinel poller and Watchdog monitor tasks."""
+    poller_task = asyncio.create_task(poll_loop()) if POLL_ENABLED else None
+    watchdog_task = asyncio.create_task(watchdog_loop())
+    yield
+    if poller_task:
+        poller_task.cancel()
+    if watchdog_task:
+        watchdog_task.cancel()
+
+
+app = FastAPI(title="SavageOps", lifespan=lifespan)
+
 app.include_router(health_router)
-app.include_router(incident_router)
-
-# Prometheus Metrics
-AGENT_RUNS = Counter("agent_runs_total", "Total agent executions", ["agent", "kind"])
-AGENT_LATENCY = Histogram("agent_latency_seconds", "Agent latency in seconds", ["agent"])
-ESCALATIONS = Counter("incident_escalations_total", "Total incidents escalated to needs_human")
+app.include_router(sentinel_webhook_router)
 
 
 @app.get("/metrics", tags=["observability"])

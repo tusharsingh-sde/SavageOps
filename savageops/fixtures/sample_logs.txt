@@ -1,0 +1,7 @@
+2026-10-28 13:30:10,120 INFO milky-macaron CHECKOUT_STARTED request_id=3b074d28-76ad-45ce-8c10-53bc3a76ef48 item_count=2
+2026-10-28 13:30:10,123 ERROR milky-macaron CHECKOUT_FAILED request_id=3b074d28-76ad-45ce-8c10-53bc3a76ef48
+Traceback (most recent call last):
+  File "app.py", line 53, in checkout
+    raise KeyError("DEMO: payment_method is missing")
+KeyError: 'DEMO: payment_method is missing'
+2026-10-28 13:30:10,125 ERROR milky-macaron SAVAGEOPS_EVENT {'event': 'checkout_error', 'request_id': '3b074d28-76ad-45ce-8c10-53bc3a76ef48', 'error_type': 'KeyError', 'message': 'DEMO: payment_method is missing', 'stack_trace': 'Traceback (most recent call last):\n  File "app.py", line 53, in checkout\n    raise KeyError("DEMO: payment_method is missing")\nKeyError: \'DEMO: payment_method is missing\'\n'}

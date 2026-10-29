@@ -30,3 +30,15 @@ ADMIN_EMAILS = [
 ]
 MAX_HOPS = _positive_int("MAX_HOPS", 8)
 MAX_DIFF_LINES = _positive_int("MAX_DIFF_LINES", 200)
+
+# Sentinel & Grafana / Loki configurations
+GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:3000")
+GRAFANA_TOKEN = os.getenv("GRAFANA_TOKEN", "")
+LOKI_DATASOURCE_UID = os.getenv("LOKI_DATASOURCE_UID", "loki")
+LOKI_PUSH_URL = os.getenv("LOKI_PUSH_URL", "http://localhost:3100")
+LOG_SELECTOR = os.getenv("LOG_SELECTOR", '{service="$service"} |= "Error"')
+POLL_ENABLED = os.getenv("POLL_ENABLED", "true").lower() in ("true", "1", "yes")
+POLL_INTERVAL_SECONDS = _positive_int("POLL_INTERVAL_SECONDS", 15)
+DEBOUNCE_MINUTES = _positive_int("DEBOUNCE_MINUTES", 10)
+MAX_CONCURRENT_INCIDENTS = _positive_int("MAX_CONCURRENT_INCIDENTS", 3)
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")

@@ -57,11 +57,14 @@ def extract_path(logs: str) -> str:
 
 def run_triage(incident_id: str, alert: dict, info_request: dict | None = None) -> TriageReport:
     """Execute triage analysis on the alert and retrieved logs."""
-    service = (info_request or {}).get("service") or alert.get("labels", {}).get(
-        "service", "dummy-app"
-    )
-    minutes = (info_request or {}).get("minutes", 15)
-    logs = get_logs(service, minutes)
+    alert_for_logs = alert
+    if info_request and info_request.get("service"):
+        alert_for_logs = {
+            **alert,
+            "labels": {**alert.get("labels", {}), "service": info_request["service"]},
+        }
+    minutes_before = (info_request or {}).get("minutes", 5)
+    logs = get_logs(alert_for_logs, minutes_before=minutes_before)
     path = extract_path(logs)
     code = numbered(get_file(path))
 

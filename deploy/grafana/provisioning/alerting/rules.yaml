@@ -1,0 +1,61 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: SavageOpsAlerts
+    folder: SavageOps
+    interval: 10s
+    rules:
+      - uid: high-error-rate-dummy-app
+        title: HighErrorRate
+        condition: C
+        data:
+          - refId: A
+            queryType: range
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: loki
+            model:
+              editorMode: code
+              expr: sum(count_over_time({service="dummy-app"} |= "Error" [1m]))
+              queryType: range
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [3]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+              expression: A
+              refId: B
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [B]
+                  reducer:
+                    type: last
+              expression: $B > 3
+              refId: C
+              type: threshold
+        for: 10s
+        labels:
+          severity: critical
+          service: dummy-app
+          alertname: HighErrorRate
+        annotations:
+          summary: "5xx or critical error rate exceeds threshold in dummy-app"

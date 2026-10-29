@@ -1,13 +1,71 @@
+# Environment & secrets
 .env
 .env.*
 !.env.example
+!.env.template
+
+# Python virtual environments
 venv/
 .venv/
+env/
+ENV/
+
+# Python caches & bytecode
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+
+# Build & packaging artifacts
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing & coverage
 .pytest_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Temporary files & logs
+*.log
 .tmp/
+tmp/
+temp/
+.cache/
+
+# Internal plans & review scratchpads
 SavageOps_Plan.md
+SavageOps_Complete_Updated_Plan.md
+potential_bugs.md
+
+# Operating System files
+.DS_Store
+Thumbs.db
+[Dd]esktop.ini
+
+# IDE & editors
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~

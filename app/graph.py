@@ -12,6 +12,7 @@ from app.agents.spokesperson import run_spokesperson
 from app.agents.triage import run_triage
 from app.config import MAX_HOPS
 from app.db import update_incident
+from app.metrics import ESCALATIONS, timed
 
 
 class State(TypedDict, total=False):
@@ -42,6 +43,7 @@ def over_budget(s: State) -> bool:
 # --- Node Definitions ---
 
 
+@timed("triage")
 def triage_node(s: State) -> dict:
     r = run_triage(s["incident_id"], s["alert"], s.get("info_request"))
     return {
@@ -51,6 +53,7 @@ def triage_node(s: State) -> dict:
     }
 
 
+@timed("analyst")
 def analyst_node(s: State) -> dict:
     res = run_analyst(
         s["incident_id"],
@@ -71,6 +74,7 @@ def analyst_node(s: State) -> dict:
     }
 
 
+@timed("spokesperson")
 def spokesperson_node(s: State) -> dict:
     summ = run_spokesperson(s["incident_id"], s["triage"], s["analysis"]).model_dump()
     update_incident(
@@ -100,6 +104,7 @@ def after_gate1_node(s: State) -> dict:
     }
 
 
+@timed("fixer")
 def fixer_node(s: State) -> dict:
     draft = run_fix_draft(
         s["incident_id"],
@@ -123,12 +128,14 @@ def revise_node(s: State) -> dict:
     }
 
 
+@timed("push")
 def push_node(s: State) -> dict:
     url = run_push(s["incident_id"], s["analysis"], s["choice"], s["fix_draft"])
     return {"pr_url": url}
 
 
 def escalate_node(s: State) -> dict:
+    ESCALATIONS.inc()
     update_incident(s["incident_id"], status="needs_human")
     return {}
 

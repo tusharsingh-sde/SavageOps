@@ -1,0 +1,27 @@
+services:
+  loki:
+    image: grafana/loki:latest
+    command: -config.file=/etc/loki/local-config.yaml
+    ports: ["3100:3100"]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-savageops-secret}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on: [loki]
+
+  savageops:
+    build: ..
+    env_file: ../.env
+    environment:
+      GRAFANA_URL: http://grafana:3000
+      LOKI_PUSH_URL: http://loki:3100
+    ports: ["8000:8000"]
+    depends_on: [grafana]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health')"]
+      interval: 15s
