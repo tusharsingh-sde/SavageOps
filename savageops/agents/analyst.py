@@ -1,11 +1,12 @@
 """Agent 2: Analyst Agent for root-cause analysis and fix recommendations."""
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 
 from savageops.config import OPENAI_MODEL
 from savageops.db import log_run, update_incident
+from savageops.llm import create_chat_model, invoke_guarded
 from savageops.models import AnalystResult
+from savageops.security import redact_untrusted_text
 from savageops.tools.github_tools import get_file, numbered, recent_commits
 
 SYSTEM = """You are a senior engineer doing root-cause analysis.
@@ -42,7 +43,7 @@ prompt = ChatPromptTemplate.from_messages(
 
 
 def get_llm():
-    return ChatOpenAI(model=OPENAI_MODEL, temperature=0).with_structured_output(AnalystResult)
+    return create_chat_model(OPENAI_MODEL).with_structured_output(AnalystResult)
 
 
 def run_analyst(
@@ -54,14 +55,14 @@ def run_analyst(
     """Perform root cause analysis and propose fast/permanent solutions."""
     path = triage["file_path"]
     inp = {
-        "triage": str(triage),
-        "code": numbered(get_file(path)),
-        "history": str(recent_commits(path)),
-        "rejected": str(rejected or []),
-        "feedback": feedback or "none",
+        "triage": redact_untrusted_text(str(triage)),
+        "code": redact_untrusted_text(numbered(get_file(path, ref=triage.get("git_sha"), repo_name=triage.get("repository")))),
+        "history": redact_untrusted_text(str(recent_commits(path, repo_name=triage.get("repository"), ref=triage.get("git_sha")))),
+        "rejected": redact_untrusted_text(str(rejected or [])),
+        "feedback": redact_untrusted_text(feedback or "none"),
     }
     try:
-        res: AnalystResult = (prompt | get_llm()).invoke(inp)
+        res: AnalystResult = invoke_guarded(prompt | get_llm(), inp, incident_id)
         kind = "info_request" if res.info_request else "output"
         log_run(incident_id, "analyst", kind, {"path": path}, res.model_dump())
     except Exception as e:

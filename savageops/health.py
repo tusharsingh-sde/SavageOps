@@ -3,9 +3,10 @@
 import time
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from openai import OpenAI
 
+from savageops.auth import require_admin
 from savageops.config import (
     GRAFANA_TOKEN,
     GRAFANA_URL,
@@ -24,6 +25,10 @@ router = APIRouter(tags=["health"])
 
 def run_checks() -> dict[str, str]:
     """Execute full diagnostic checks against all external dependencies and subsystems."""
+    global _checks_cache, _checks_cached_at
+    now = time.monotonic()
+    if _checks_cache is not None and now - _checks_cached_at < 60:
+        return dict(_checks_cache)
     checks: dict[str, str] = {}
     auth_header = {"Authorization": f"Bearer {GRAFANA_TOKEN}"} if GRAFANA_TOKEN else {}
 
@@ -92,7 +97,13 @@ def run_checks() -> dict[str, str]:
         else:
             checks["poller"] = "starting"
 
-    return checks
+    _checks_cache = checks
+    _checks_cached_at = now
+    return dict(checks)
+
+
+_checks_cache: dict[str, str] | None = None
+_checks_cached_at = 0.0
 
 
 @router.get("/health")
@@ -102,7 +113,7 @@ def health() -> dict[str, str]:
 
 
 @router.get("/health/deep")
-def deep_health() -> dict:
+def deep_health(admin: dict = Depends(require_admin)) -> dict:
     """Comprehensive dependency and subsystem readiness probe."""
     checks = run_checks()
     all_ok = all(v in ("ok", "fixture_mode", "starting") for v in checks.values())

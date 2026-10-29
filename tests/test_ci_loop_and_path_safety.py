@@ -4,8 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
-from savageops.agents.fixer import ALLOWED_EXT, validate
-from savageops.tools.github_tools import validate_safe_path, wait_for_ci_status
+from savageops.agents.fixer import ALLOWED_EXT, apply_hunks, validate
+from savageops.tools.github_tools import sanitize_markdown, validate_safe_path, wait_for_ci_status
 
 
 def test_path_safety_traversal():
@@ -34,11 +34,22 @@ def test_path_safety_traversal():
     with pytest.raises(ValueError, match="Restricted or invalid"):
         validate_safe_path("subfolder/.github/action.yml")
 
+    for path in ("auth.py", "settings.py", "db/migrations/001.sql", "tests/test_app.py", "Dockerfile"):
+        with pytest.raises(ValueError, match="Restricted or invalid"):
+            validate_safe_path(path)
+
 
 def test_allowed_extensions():
     assert ".py" in ALLOWED_EXT
     assert ".sh" not in ALLOWED_EXT
     assert ".yaml" not in ALLOWED_EXT
+
+
+def test_pr_text_neutralizes_mentions_and_links():
+    result = sanitize_markdown("@here https://example.com/path www.example.org")
+    assert "@here" not in result
+    assert "https://" not in result
+    assert "www." not in result
 
 
 def test_code_validation_syntax():
@@ -48,6 +59,14 @@ def test_code_validation_syntax():
     invalid_code = "def broken(a, b\n    return a +"
     with pytest.raises(SyntaxError):
         validate("test.py", invalid_code)
+
+
+def test_exact_hunks_preserve_crlf_and_final_newline():
+    original = "def value():\r\n    return 1\r\n"
+    result = apply_hunks(original, [{"old_text": "return 1", "new_text": "return 2"}])
+    assert result == "def value():\r\n    return 2\r\n"
+    with pytest.raises(ValueError, match="exactly once"):
+        apply_hunks(original + "# return 1\r\n", [{"old_text": "return 1", "new_text": "return 3"}])
 
 
 @patch("savageops.tools.github_tools.get_ci_check_runs")

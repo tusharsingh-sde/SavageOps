@@ -2,29 +2,44 @@
 
 import logging
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
-from savageops.config import DEBOUNCE_MINUTES
+from savageops.config import GROUP_COOLDOWN_SECONDS
 from savageops.db import db
+from savageops.security import redact_untrusted_data
 
 logger = logging.getLogger(__name__)
 
-OPEN = ["received", "triaged", "awaiting_user", "awaiting_push", "fixing"]
+OPEN = [
+    "received", "triaged", "awaiting_user", "awaiting_push", "fixing", "pushing",
+    "needs_human", "failed", "pr_open",
+]
 
 
 def normalize(a: dict) -> dict:
     """Normalize alert dictionary from webhook or poller into a standard shape."""
-    return {
+    starts_at = a.get("startsAt")
+    if starts_at:
+        try:
+            parsed = datetime.fromisoformat(str(starts_at).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            starts_at = parsed.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            pass
+    return redact_untrusted_data({
         "status": "firing",
         "labels": a.get("labels", {}),
         "annotations": a.get("annotations", {}),
-        "startsAt": a.get("startsAt"),
+        "startsAt": starts_at,
         "fingerprint": a.get("fingerprint"),
         "generatorURL": a.get("generatorURL"),
-    }
+    })
 
 
 def _record_metric(source: str, result: str):
+    if source == "canary":
+        return
     try:
         from savageops.metrics import INGEST
 
@@ -34,7 +49,7 @@ def _record_metric(source: str, result: str):
 
 
 def ingest(alert: dict, source: str) -> str | None:
-    """Process an alert: dedupe, debounce flapping episodes, and persist if new.
+    """Process an alert: dedupe open groups, cool down resolved groups, and persist if new.
 
     Returns incident_id if a new incident was created, else None.
     """
@@ -44,6 +59,8 @@ def ingest(alert: dict, source: str) -> str | None:
 
     labels = alert.get("labels", {})
     group = f"{labels.get('alertname', 'unknown')}:{labels.get('service', 'unknown')}"
+    if source == "canary":
+        group = f"canary:{group}"
 
     # 1. Exact Duplicate Guard
     try:
@@ -56,7 +73,6 @@ def ingest(alert: dict, source: str) -> str | None:
         logger.debug("Sentinel: could not check duplicate by fingerprint: %s", e)
 
     # 2. Debounce Flapping Guard
-    since = (datetime.now(UTC) - timedelta(minutes=DEBOUNCE_MINUTES)).isoformat()
     recent = []
     try:
         recent = (
@@ -64,7 +80,6 @@ def ingest(alert: dict, source: str) -> str | None:
             .select("id,occurrences")
             .eq("group_key", group)
             .in_("status", OPEN)
-            .gte("last_seen_at", since)
             .execute()
             .data
         )
@@ -72,6 +87,8 @@ def ingest(alert: dict, source: str) -> str | None:
         logger.debug("Sentinel: group_key or occurrences not queryable (migration pending?): %s", e)
 
     if recent:
+        # Open incidents remain the deduplication target beyond the debounce interval.
+        # The database partial unique index makes this safe across multiple workers.
         r = recent[0]
         current_occurrences = r.get("occurrences", 1) or 1
         now_iso = datetime.now(UTC).isoformat()
@@ -93,14 +110,31 @@ def ingest(alert: dict, source: str) -> str | None:
         )
         return None
 
+    cooldown_since = datetime.fromtimestamp(time.time() - GROUP_COOLDOWN_SECONDS, UTC).isoformat()
+    try:
+        recently_seen = (
+            db.table("incidents")
+            .select("id,status")
+            .eq("group_key", group)
+            .gte("last_seen_at", cooldown_since)
+            .execute()
+            .data
+            or []
+        )
+        if any(r.get("status") not in OPEN for r in recently_seen):
+            _record_metric(source, "cooldown")
+            return None
+    except Exception as e:
+        logger.debug("Sentinel: group cooldown lookup unavailable: %s", e)
+
     # 3. Create New Incident
     now_iso = datetime.now(UTC).isoformat()
     row_payload = {
         "fingerprint": key,
         "group_key": group,
         "source": source,
-        "alert": alert,
-        "status": "received",
+        "alert": redact_untrusted_data(alert),
+        "status": "canary" if source == "canary" else "received",
         "occurrences": 1,
         "last_seen_at": now_iso,
         "created_at": now_iso,
@@ -117,8 +151,9 @@ def ingest(alert: dict, source: str) -> str | None:
         if "does not exist" in err_msg or "PGRST204" in err_msg:
             fallback_payload = {
                 "fingerprint": key,
-                "alert": alert,
-                "status": "received",
+                "source": source,
+                "alert": redact_untrusted_data(alert),
+                "status": "canary" if source == "canary" else "received",
                 "pending": {"group_key": group, "source": source, "occurrences": 1},
                 "created_at": now_iso,
                 "updated_at": now_iso,

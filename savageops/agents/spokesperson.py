@@ -1,11 +1,12 @@
 """Agent 3 Part A: Spokesperson Agent generating brutal, funny incident summaries for Gate 1."""
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 
 from savageops.config import OPENAI_MODEL
 from savageops.db import log_run
+from savageops.llm import create_chat_model, invoke_guarded
 from savageops.models import SavageSummary
+from savageops.security import redact_untrusted_text
 
 SYSTEM = """You are SavageOps: a brutally honest, funny senior DevOps engineer.
 Summarise the incident for the developer.
@@ -26,14 +27,16 @@ prompt = ChatPromptTemplate.from_messages(
 
 
 def get_llm():
-    return ChatOpenAI(model=OPENAI_MODEL, temperature=0.7).with_structured_output(SavageSummary)
+    return create_chat_model(OPENAI_MODEL, temperature=0.7).with_structured_output(SavageSummary)
 
 
 def run_spokesperson(incident_id: str, triage: dict, analysis: dict) -> SavageSummary:
     """Generate the savage human-facing incident summary for Gate 1 review."""
     llm = get_llm()
-    summary: SavageSummary = (prompt | llm).invoke(
-        {"triage": str(triage), "analysis": str(analysis)}
+    summary: SavageSummary = invoke_guarded(
+        prompt | llm,
+        {"triage": redact_untrusted_text(str(triage)), "analysis": redact_untrusted_text(str(analysis))},
+        incident_id,
     )
     log_run(incident_id, "spokesperson", "output", None, summary.model_dump())
     return summary

@@ -1,9 +1,11 @@
 """Authentication and admin role verification for SavageOps API."""
 
+import hmac
+
 import jwt
 from fastapi import Header, HTTPException, status
 
-from savageops.config import ADMIN_EMAILS, SUPABASE_JWT_SECRET
+from savageops.config import ADMIN_USER_IDS, SUPABASE_JWT_SECRET
 
 
 def require_admin(authorization: str | None = Header(None)) -> dict:
@@ -15,13 +17,6 @@ def require_admin(authorization: str | None = Header(None)) -> dict:
         )
 
     token = authorization.removeprefix("Bearer ").strip()
-
-    # Allow local development bypass if configured
-    if token == "dev-admin-token":
-        return {
-            "email": ADMIN_EMAILS[0] if ADMIN_EMAILS else "admin@savageops.local",
-            "role": "admin",
-        }
 
     if not SUPABASE_JWT_SECRET:
         raise HTTPException(
@@ -42,11 +37,11 @@ def require_admin(authorization: str | None = Header(None)) -> dict:
             detail=f"Invalid token: {e}",
         )
 
-    email = claims.get("email", "").lower()
-    if email not in ADMIN_EMAILS:
+    user_id = claims.get("sub", "")
+    if not ADMIN_USER_IDS or not any(hmac.compare_digest(user_id, allowed) for allowed in ADMIN_USER_IDS):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Forbidden: email '{email}' is not an authorized administrator",
+            detail="Forbidden: user is not an authorized administrator",
         )
 
     return claims

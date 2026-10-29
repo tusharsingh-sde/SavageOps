@@ -1,1 +1,0 @@
-"""SavageOps application package."""

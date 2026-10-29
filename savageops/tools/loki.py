@@ -74,6 +74,9 @@ def get_logs(alert: dict | str, minutes_before: int = 5) -> str:
         query = Template(LOG_SELECTOR).safe_substitute(labels)
     except Exception:
         query = f'{{service="{service}"}} |= "Error"'
+    # Always query the complete stream. Loki emits each traceback frame as a separate
+    # entry, so a line-level |= filter would discard the frames needed for triage.
+    query = query.split("|", 1)[0].strip()
 
     start_dt = _parse_timestamp(alert_dict.get("startsAt")) - timedelta(minutes=minutes_before)
     end_ns = int(time.time() * 1e9)
@@ -90,7 +93,7 @@ def get_logs(alert: dict | str, minutes_before: int = 5) -> str:
                 "query": query,
                 "start": start_ns,
                 "end": end_ns,
-                "limit": 200,
+                "limit": 500,
                 "direction": "forward",
             },
             timeout=15.0,
@@ -101,6 +104,15 @@ def get_logs(alert: dict | str, minutes_before: int = 5) -> str:
             (v for s in data for v in s.get("values", [])),
             key=lambda v: int(v[0]),
         )
+        if not rows:
+            return ""
+        # Select a compact window around the first error event while keeping unfiltered
+        # stack-frame entries that share its timestamp neighborhood.
+        error_rows = [v for v in rows if re.search(r"(?i)error|exception|traceback|fatal", v[1])]
+        if error_rows:
+            center = int(error_rows[0][0])
+            margin_ns = 90 * 1_000_000_000
+            rows = [v for v in rows if abs(int(v[0]) - center) <= margin_ns]
         return "\n".join(v[1] for v in rows)
     except Exception as e:
         logger.warning("Failed to query Loki at %s: %s. Falling back to local fixture.", base, e)

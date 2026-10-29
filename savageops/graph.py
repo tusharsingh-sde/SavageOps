@@ -13,6 +13,7 @@ from savageops.agents.triage import run_triage
 from savageops.config import MAX_HOPS
 from savageops.db import update_incident
 from savageops.metrics import ESCALATIONS, timed
+from savageops.security import redact_untrusted_data
 
 
 class State(TypedDict, total=False):
@@ -145,10 +146,17 @@ def done_rejected(s: State) -> dict:
     return {}
 
 
+def mark_not_applicable(s: State) -> dict:
+    update_incident(s["incident_id"], status="not_applicable", pending=None)
+    return {}
+
+
 # --- Routing Logic ---
 
 
 def route_after_triage(s: State) -> str:
+    if not s["triage"].get("applicable", True):
+        return "not_applicable"
     if s["triage"]["confidence"] < 0.6 or over_budget(s):
         return "escalate"
     return "analyst"
@@ -166,7 +174,7 @@ def route_after_gate1(s: State) -> str:
     action = s.get("user_decision", {}).get("action")
     if action == "approve":
         return "fixer"
-    return "analyst" if s.get("rejections", 0) < 2 and not over_budget(s) else "escalate"
+    return "analyst" if s.get("rejections", 0) < 3 and not over_budget(s) else "escalate"
 
 
 def route_after_fixer(s: State) -> str:
@@ -198,6 +206,7 @@ for name, fn in [
     ("push", push_node),
     ("escalate", escalate_node),
     ("done_rejected", done_rejected),
+    ("not_applicable", mark_not_applicable),
 ]:
     builder.add_node(name, fn)
 
@@ -213,12 +222,19 @@ builder.add_edge("revise", "fixer")
 builder.add_edge("push", END)
 builder.add_edge("escalate", END)
 builder.add_edge("done_rejected", END)
+builder.add_edge("not_applicable", END)
 
 checkpointer = MemorySaver()
 graph = builder.compile(checkpointer=checkpointer)
 
 
+def configure_postgres_checkpointer(checkpointer_obj) -> None:
+    """Replace the local memory checkpointer with a durable PostgreSQL checkpointer."""
+    global graph
+    graph = builder.compile(checkpointer=checkpointer_obj)
+
+
 def run_pipeline(incident_id: str, alert: dict):
     """Invoke the LangGraph pipeline for an incident in a separate thread context."""
     cfg = {"configurable": {"thread_id": incident_id}}
-    graph.invoke({"incident_id": incident_id, "alert": alert}, cfg)
+    graph.invoke({"incident_id": incident_id, "alert": redact_untrusted_data(alert)}, cfg)

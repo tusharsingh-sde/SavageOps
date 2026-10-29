@@ -9,15 +9,16 @@ import httpx
 
 from savageops.config import GRAFANA_TOKEN, GRAFANA_URL, POLL_INTERVAL_SECONDS
 from savageops.sentinel.ingest import ingest, monitoring_down, normalize
-from savageops.sentinel.runner import start
+from savageops.sentinel.runner import schedule
 
 logger = logging.getLogger(__name__)
 
-state: dict[str, Any] = {"last_ok": None, "fails": 0}
+state: dict[str, Any] = {"last_ok": None, "fails": 0, "down_notified": False}
 
 
 async def poll_loop():
     """Periodically poll Grafana Alertmanager active alerts as a fallback safety net."""
+    state["started_at"] = time.monotonic()
     headers = {"Authorization": f"Bearer {GRAFANA_TOKEN}"} if GRAFANA_TOKEN else {}
     async with httpx.AsyncClient(timeout=10) as client:
         while True:
@@ -32,12 +33,15 @@ async def poll_loop():
                 alerts = r.json()
                 if isinstance(alerts, list):
                     for a in alerts:
+                        if a.get("labels", {}).get("savageops", "").lower() != "true":
+                            continue
                         alert = normalize(a)
                         inc_id = await asyncio.to_thread(ingest, alert, "poller")
                         if inc_id:
-                            asyncio.create_task(asyncio.to_thread(start, inc_id, alert))
+                            schedule(inc_id, alert)
                 state["last_ok"] = time.time()
                 state["fails"] = 0
+                state["down_notified"] = False
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -47,7 +51,12 @@ async def poll_loop():
                     state["fails"],
                     e,
                 )
-                if state["fails"] == 3:
+                if (
+                    state["fails"] >= 3
+                    and not state["down_notified"]
+                    and time.monotonic() - state["started_at"] >= 120
+                ):
                     await asyncio.to_thread(monitoring_down)
+                    state["down_notified"] = True
 
             await asyncio.sleep(POLL_INTERVAL_SECONDS)

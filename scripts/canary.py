@@ -4,10 +4,11 @@ import json
 import logging
 import sys
 from datetime import date
-from pathlib import Path
+from importlib import resources
 
 from savageops.agents.analyst import run_analyst
 from savageops.agents.triage import run_triage
+from savageops.db import update_incident
 from savageops.sentinel.ingest import ingest, normalize
 from savageops.watchdog import send_alert
 
@@ -17,13 +18,14 @@ logger = logging.getLogger("canary")
 
 def run_canary() -> bool:
     """Execute end-to-end canary check using sample fixture to test agent intelligence without pushing code."""
-    fixture_file = Path(__file__).resolve().parents[1] / "fixtures" / "sample_alert.json"
-    if not fixture_file.exists():
-        logger.error("Canary: fixtures/sample_alert.json not found")
+    try:
+        fixture_text = (resources.files("savageops") / "fixtures" / "sample_alert.json").read_text(
+            encoding="utf-8"
+        )
+    except (FileNotFoundError, ModuleNotFoundError):
+        logger.error("Canary: packaged fixtures/sample_alert.json not found")
         return False
-
-    with open(fixture_file, encoding="utf-8") as f:
-        data = json.load(f)
+    data = json.loads(fixture_text)
 
     alert = normalize(data["alerts"][0])
     alert["fingerprint"] = f"canary-{date.today().isoformat()}"
@@ -55,6 +57,8 @@ def run_canary() -> bool:
     except Exception as e:
         send_alert(f"CANARY FAIL with exception: {e}")
         return False
+    finally:
+        update_incident(inc_id, status="canary")
 
 
 if __name__ == "__main__":

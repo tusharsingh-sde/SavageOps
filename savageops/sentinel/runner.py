@@ -2,6 +2,7 @@
 
 import logging
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from savageops.config import MAX_CONCURRENT_INCIDENTS
 from savageops.db import log_run, update_incident
@@ -10,6 +11,27 @@ from savageops.graph import run_pipeline
 logger = logging.getLogger(__name__)
 
 _sem = threading.BoundedSemaphore(MAX_CONCURRENT_INCIDENTS)
+_executor = ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT_INCIDENTS, thread_name_prefix="savageops-incident"
+)
+_futures: set[Future] = set()
+_futures_lock = threading.Lock()
+
+
+def schedule(incident_id: str, alert: dict) -> Future:
+    """Submit pipeline work to its own bounded executor and retain the future."""
+    future = _executor.submit(start, incident_id, alert)
+    with _futures_lock:
+        _futures.add(future)
+    future.add_done_callback(lambda done: _discard_future(done))
+    return future
+
+
+def _discard_future(future: Future) -> None:
+    with _futures_lock:
+        _futures.discard(future)
+    if future.exception():
+        logger.error("Scheduled incident pipeline failed: %s", future.exception())
 
 
 def start(incident_id: str, alert: dict):

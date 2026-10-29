@@ -9,7 +9,7 @@ contactPoints:
           url: http://savageops:8000/api/webhook/grafana
           httpMethod: POST
           authorization_scheme: Bearer
-          authorization_credentials: ${WEBHOOK_SECRET:-savageops-secret}
+          authorization_credentials: ${WEBHOOK_SECRET}
 policies:
   - orgId: 1
     receiver: savageops
@@ -17,3 +17,7 @@ policies:
     group_wait: 5s
     group_interval: 1m
     repeat_interval: 4h
+    routes:
+      - receiver: savageops
+        object_matchers:
+          - [savageops, "=", "true"]

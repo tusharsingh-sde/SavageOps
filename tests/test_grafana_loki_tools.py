@@ -1,5 +1,6 @@
 """Tests for Grafana and Loki tooling with LogQL injection protection."""
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -38,6 +39,18 @@ def test_loki_fixture_fallback():
         logs = get_logs(sample_alert)
         assert len(logs) > 0
         assert "Traceback" in logs or "Error" in logs
+
+
+def test_loki_query_does_not_filter_traceback_frames():
+    response = SimpleNamespace(
+        raise_for_status=lambda: None,
+        json=lambda: {"data": {"result": []}},
+    )
+    with patch("savageops.tools.loki.GRAFANA_URL", "https://grafana.example"), \
+         patch("savageops.tools.loki.LOKI_URL", ""), \
+         patch("savageops.tools.loki.httpx.get", return_value=response) as get:
+        get_logs({"labels": {"service": "dummy-app"}, "startsAt": "2026-10-28T10:00:00Z"})
+    assert get.call_args.kwargs["params"]["query"] == '{service="dummy-app"}'
 
 
 def test_still_firing_safe_fallback():

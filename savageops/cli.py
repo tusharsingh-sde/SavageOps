@@ -81,6 +81,9 @@ def main():
         src = resources.files("savageops") / "templates"
         dest = Path.cwd() / "savageops-config"
         shutil.copytree(src, dest, dirs_exist_ok=True)
+        packaged_env = dest / "env.example"
+        if packaged_env.exists():
+            packaged_env.replace(dest / ".env.example")
         print(f"[OK] savageops-config/ created at {dest.resolve()}")
         print("Included: .env.example, docker-compose.yml, and Grafana provisioning configs.")
 

@@ -99,7 +99,7 @@ Poller (backup every 15 s) ──────────▶ ┘       │
 
 | Requirement | Minimum |
 |-------------|---------|
-| Python | 3.10+ |
+| Python | 3.11+ |
 | OpenAI API key | `gpt-4o-mini` or higher |
 | GitHub PAT | `repo` scope |
 | Supabase project | URL + Service Key |
@@ -183,22 +183,28 @@ Create a `.env` file from `.env.example`. All variables are read via
 | `TARGET_REPO` | ✅ | — | Target repo as `owner/repo` |
 | `SUPABASE_URL` | ✅ | — | Supabase project URL |
 | `SUPABASE_SERVICE_KEY` | ✅ | — | Supabase service role key |
-| `SUPABASE_JWT_SECRET` | ✅ | — | JWT secret for webhook auth |
+| `SUPABASE_JWT_SECRET` | ✅ | — | JWT secret for Supabase admin auth |
 | `LOKI_URL` | ✅ | — | Loki query URL |
 | `WEBHOOK_SECRET` | ✅ | — | Bearer token for Grafana → SavageOps webhook |
-| `ADMIN_EMAILS` | | — | Comma-separated list of admin emails |
-| `MAX_HOPS` | | `8` | Max agent loop iterations |
+| `ADMIN_USER_IDS` | ✅ | — | Comma-separated Supabase Auth user UUID allowlist |
+| `MAX_HOPS` | | `12` | Max agent loop iterations |
 | `MAX_DIFF_LINES` | | `200` | Max diff lines per fix |
 | `GRAFANA_URL` | | `http://localhost:3000` | Grafana base URL |
 | `GRAFANA_TOKEN` | | — | Grafana Service Account token |
 | `LOKI_DATASOURCE_UID` | | `loki` | Grafana datasource UID for Loki |
 | `LOKI_PUSH_URL` | | `http://localhost:3100` | Loki push API endpoint |
-| `LOG_SELECTOR` | | `{service="$service"} \|= "Error"` | LogQL selector template |
+| `LOG_SELECTOR` | | `{service="$service"}` | Unfiltered LogQL stream selector; traceback frames are retrieved together |
 | `POLL_ENABLED` | | `true` | Enable backup Grafana poller |
 | `POLL_INTERVAL_SECONDS` | | `15` | Poller interval in seconds |
-| `DEBOUNCE_MINUTES` | | `10` | Alert debounce window |
+| `GROUP_COOLDOWN_SECONDS` | | `60` | Cooldown after an alert group closes |
 | `MAX_CONCURRENT_INCIDENTS` | | `3` | Max simultaneous agent pipelines |
 | `SLACK_WEBHOOK_URL` | | — | Slack incoming webhook for notifications |
+| `DATABASE_URL` | Production | — | Supabase direct/session PostgreSQL URL for durable graph checkpoints (never transaction pooler) |
+| `APP_ENV` | | `development` | Set to `production` to require durable checkpoints and admin IDs |
+| `SERVICE_PATH_MAP` | | `{}` | JSON service mapping, e.g. `{"billing":{"repo":"org/billing","prefix":"src"}}` |
+| `MAX_DAILY_LLM_CALLS` | | `500` | Per-process daily ceiling on LLM requests |
+| `MAX_DAILY_LLM_TOKENS` | | `1000000` | Conservative daily token reservation cap per process |
+| `GRAFANA_ADMIN_PASSWORD` | Docker | — | Password for the local Grafana admin account |
 
 ---
 
@@ -208,8 +214,8 @@ Sentinel is the alert-ingestion gateway sitting between Grafana and the AI agent
 
 | Feature | Description |
 |---------|-------------|
-| **Deduplication** | Dedupes by `fingerprint:startsAt` episode key |
-| **Debouncing** | Flapping alerts within `DEBOUNCE_MINUTES` increment `occurrences` instead of triggering redundant AI pipelines |
+| **Deduplication** | Normalizes timestamps and keeps one open incident per alert/service group |
+| **Debouncing** | Open groups and a short post-resolution cooldown suppress duplicate AI pipelines |
 | **Backup Poller** | Polls Grafana Alertmanager every 15 s in case webhooks drop |
 | **Heartbeat Watchdog** | Auto-creates an incident if Grafana is unreachable for 3 consecutive poll cycles |
 | **Concurrency Control** | Limits simultaneous active agent pipelines to `MAX_CONCURRENT_INCIDENTS` (default 3) |
@@ -220,10 +226,10 @@ Sentinel is the alert-ingestion gateway sitting between Grafana and the AI agent
 
 | Layer | Mechanism |
 |-------|-----------|
-| **Path Safety** | Blocks path traversal (`..`, leading `/` or `\`), `.github/` workflows; restricts auto-fix files to `.py` |
+| **Path Safety** | Blocks path traversal, auth/configuration, migrations, tests, and `.github`; restricts auto-fix files to `.py` |
 | **Pre-PR Validation** | AST parse (`ast.parse()`) + Ruff lint (`ruff check --select E9,F`) |
 | **Post-PR CI Verification** | Queries GitHub Actions check runs on the PR HEAD; on failure, Fixer analyses the test output and pushes a retry commit |
-| **Budget Enforcers** | `info_requests ≤ 2`, `rejections ≤ 2`, `revisions ≤ 2`, `MAX_HOPS ≤ 8` |
+| **Budget Enforcers** | `info_requests ≤ 2`, `rejections ≤ 3`, `revisions ≤ 2`, `MAX_HOPS` default 12, plus per-process daily request and token caps |
 
 ---
 
@@ -252,12 +258,12 @@ One-command setup with Grafana, Loki, and SavageOps:
 cd deploy
 
 # 1. Start the observability stack
-docker compose up -d loki grafana
+docker compose --env-file ../.env up -d loki grafana
 
 # 2. (Optional) Create a Grafana Service Account Viewer token → GRAFANA_TOKEN in .env
 
 # 3. Build and start SavageOps
-docker compose up -d --build savageops
+docker compose --env-file ../.env up -d --build savageops
 ```
 
 Pre-configured provisioning is included in `deploy/grafana/provisioning/`:
@@ -279,7 +285,15 @@ ALTER TABLE incidents ADD COLUMN IF NOT EXISTS group_key      text;
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS occurrences    int  DEFAULT 1;
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS source         text;
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS last_seen_at   timestamptz DEFAULT now();
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS alerted_at     timestamptz;
 ```
+
+The migration also creates a partial unique index for open alert groups. Resolve any
+pre-existing duplicate open groups before applying it. In Supabase Auth, disable public
+signups and email confirmation bypasses, then put the trusted users' Auth UUIDs in
+`ADMIN_USER_IDS`. Protect the target repository's default branch with required human review.
+Production uses the direct/session Postgres URL for checkpoints; do not use the transaction pooler.
+Run one Uvicorn worker per SavageOps instance because each process owns a poller and watchdog.
 
 ---
 

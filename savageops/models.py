@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class TriageReport(BaseModel):
@@ -16,6 +16,9 @@ class TriageReport(BaseModel):
     severity_reason: str = Field(description="Explanation for the assigned severity.")
     evidence: list[str] = Field(description="Log snippets or trace elements supporting triage.")
     confidence: float = Field(ge=0.0, le=1.0, description="Confidence score between 0.0 and 1.0.")
+    applicable: bool = Field(default=True, description="Whether this is an actionable code incident.")
+    repository: str | None = Field(default=None, description="Mapped GitHub repository for this service.")
+    git_sha: str | None = Field(default=None, description="Deployed revision from the alert labels, when available.")
 
 
 class InfoRequest(BaseModel):
@@ -58,6 +61,12 @@ class AnalystResult(BaseModel):
     analysis: AnalysisReport | None = None
     info_request: InfoRequest | None = None
 
+    @model_validator(mode="after")
+    def require_exactly_one_result(self):
+        if (self.analysis is None) == (self.info_request is None):
+            raise ValueError("Exactly one of analysis or info_request must be provided")
+        return self
+
 
 class SavageSummary(BaseModel):
     """Output from Agent 3 (Spokesperson) presented to user at Gate 1."""
@@ -70,8 +79,15 @@ class SavageSummary(BaseModel):
     options: str = Field(description="One-line summary for fast fix vs permanent fix with risks.")
 
 
-class FixedFile(BaseModel):
-    """Output from Agent 3 (Fixer) representing code changes."""
+class PatchHunk(BaseModel):
+    """One exact source replacement; old_text must occur exactly once."""
 
-    new_file_content: str = Field(description="The complete updated file content.")
+    old_text: str = Field(min_length=1)
+    new_text: str = Field(min_length=1)
+
+
+class FixedFile(BaseModel):
+    """Output from Agent 3 (Fixer) representing exact, uniquely matched edits."""
+
+    hunks: list[PatchHunk] = Field(min_length=1, description="Exact search/replace edits to apply in order.")
     commit_message: str = Field(description="Git commit message describing the fix.")

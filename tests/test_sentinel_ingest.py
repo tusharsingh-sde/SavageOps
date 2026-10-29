@@ -25,7 +25,7 @@ def test_normalize_alert():
 def test_ingest_and_deduplication():
     alert = {
         "status": "firing",
-        "labels": {"alertname": "DeadlockTest", "service": "order-svc"},
+        "labels": {"alertname": f"DeadlockTest-{datetime.now().timestamp()}", "service": "order-svc"},
         "startsAt": f"2026-10-28T12:00:{int(datetime.now().timestamp())}Z",
         "fingerprint": f"fp-deadlock-{datetime.now().timestamp()}",
     }

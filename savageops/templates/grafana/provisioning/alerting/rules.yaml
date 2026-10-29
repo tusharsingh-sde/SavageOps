@@ -7,7 +7,7 @@ groups:
     rules:
       - uid: high-error-rate-dummy-app
         title: HighErrorRate
-        condition: C
+        condition: B
         data:
           - refId: A
             queryType: range
@@ -32,29 +32,15 @@ groups:
                   query:
                     params: [A]
                   reducer:
+                    params: []
                     type: last
-              expression: A
+                  type: query
               refId: B
-              type: reduce
-          - refId: C
-            datasourceUid: __expr__
-            model:
-              conditions:
-                - evaluator:
-                    params: [0]
-                    type: gt
-                  operator:
-                    type: and
-                  query:
-                    params: [B]
-                  reducer:
-                    type: last
-              expression: $B > 3
-              refId: C
-              type: threshold
+              type: classic_conditions
         for: 10s
         labels:
           severity: critical
+          savageops: "true"
           service: dummy-app
           alertname: HighErrorRate
         annotations:

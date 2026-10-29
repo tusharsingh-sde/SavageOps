@@ -1,5 +1,6 @@
 """Grafana webhook listener for SavageOps."""
 
+import hmac
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
@@ -20,7 +21,7 @@ async def grafana_webhook(
 ) -> dict:
     """Receive alerts from Grafana, authenticate via secret header,
     and deduplicate by fingerprint."""
-    if not WEBHOOK_SECRET or x_webhook_secret != WEBHOOK_SECRET:
+    if not WEBHOOK_SECRET or not x_webhook_secret or not hmac.compare_digest(x_webhook_secret, WEBHOOK_SECRET):
         logger.warning("Rejected webhook request with invalid secret")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="bad secret")
 

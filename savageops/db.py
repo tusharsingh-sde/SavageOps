@@ -1,33 +1,45 @@
-"""Database operations wrapper for Supabase with in-memory fallback when unconfigured."""
+"""Supabase database access with an explicitly enabled development test store."""
 
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
 from supabase import Client, create_client
 
-from savageops.config import SUPABASE_SERVICE_KEY, SUPABASE_URL
+from savageops.config import APP_ENV, SUPABASE_SERVICE_KEY, SUPABASE_URL
+from savageops.security import redact_untrusted_data
 
 logger = logging.getLogger(__name__)
 
 _client: Client | None = None
-# In-memory stores used when Supabase credentials are not configured yet
+# The in-memory store is available only under SAVAGEOPS_MOCK=1 outside production.
 _memory_incidents: dict[str, dict[str, Any]] = {}
 _memory_agent_runs: list[dict[str, Any]] = []
 
 
+def _mock_enabled() -> bool:
+    """Return true only for an explicit non-production mock-mode opt-in."""
+    return os.getenv("SAVAGEOPS_MOCK") == "1" and APP_ENV != "production"
+
+
 def get_db() -> Client | None:
-    """Return the Supabase client instance if configured."""
+    """Return Supabase client or allow the explicit mock store; never hide production failure."""
+    if _mock_enabled():
+        return None
     global _client
     if _client is not None:
         return _client
-    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
-        try:
-            _client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-            return _client
-        except Exception as e:
-            logger.error("Failed to initialize Supabase client: %s", e)
-    return None
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        raise RuntimeError("Supabase URL and service key are required; set SAVAGEOPS_MOCK=1 only for local tests")
+    try:
+        _client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        return _client
+    except Exception as e:
+        if _mock_enabled():
+            logger.warning("Supabase unavailable in explicit mock mode: %s", e)
+            return None
+        raise RuntimeError(f"Supabase client initialization failed: {e}") from e
 
 
 class _MemoryQueryResult:
@@ -141,13 +153,15 @@ class _MemoryTableQuery:
 
 
 class _DbProxy:
-    """Proxy object allowing db.table(...) syntax while supporting lazy connection and in-memory fallback."""
+    """Proxy object allowing db.table(...) syntax with explicit mock-only memory behavior."""
 
     def table(self, name: str):
         client = get_db()
         if client:
             return client.table(name)
-        return _MemoryTableQuery(name)
+        if _mock_enabled():
+            return _MemoryTableQuery(name)
+        raise RuntimeError("In-memory database is disabled; set SAVAGEOPS_MOCK=1 only for local tests")
 
 
 db = _DbProxy()
@@ -162,20 +176,22 @@ def log_run(
     error: str | None = None,
 ) -> None:
     """Log an agent interaction to the agent_runs table or memory fallback."""
-    try:
-        from savageops.metrics import AGENT_RUNS
+    incident = get_incident(incident_id)
+    if not incident or incident.get("source") != "canary":
+        try:
+            from savageops.metrics import AGENT_RUNS
 
-        AGENT_RUNS.labels(agent=agent, kind=kind).inc()
-    except Exception:
-        pass
+            AGENT_RUNS.labels(agent=agent, kind=kind).inc()
+        except Exception:
+            pass
 
     payload = {
         "incident_id": incident_id,
         "agent": agent,
         "kind": kind,
-        "input": inp,
-        "output": out,
-        "error": error,
+        "input": redact_untrusted_data(inp),
+        "output": redact_untrusted_data(out),
+        "error": redact_untrusted_data(error),
     }
     client = get_db()
     if client:
@@ -183,8 +199,11 @@ def log_run(
             client.table("agent_runs").insert(payload).execute()
             return
         except Exception as e:
-            logger.warning("Failed to insert into agent_runs in Supabase: %s", e)
-    _memory_agent_runs.append(payload)
+            if not _mock_enabled():
+                raise RuntimeError(f"Supabase agent_runs insert failed: {e}") from e
+            logger.warning("Using explicit mock store after agent_runs insert failure: %s", e)
+    if _mock_enabled():
+        _memory_agent_runs.append(payload)
 
 
 def update_incident(incident_id: str, **fields: Any) -> None:
@@ -193,14 +212,18 @@ def update_incident(incident_id: str, **fields: Any) -> None:
     now_iso = datetime.now(UTC).isoformat()
     fields_to_update = dict(fields)
     fields_to_update["updated_at"] = now_iso
+    if "status" in fields:
+        fields_to_update.setdefault("alerted_at", None)
 
     if client:
         try:
             client.table("incidents").update(fields_to_update).eq("id", incident_id).execute()
             return
         except Exception as e:
-            logger.warning("Failed to update incident in Supabase: %s", e)
-    if incident_id in _memory_incidents:
+            if not _mock_enabled():
+                raise RuntimeError(f"Supabase update failed: {e}") from e
+            logger.warning("Using explicit mock store after incident update failure: %s", e)
+    if _mock_enabled() and incident_id in _memory_incidents:
         _memory_incidents[incident_id].update(fields_to_update)
 
 
@@ -212,5 +235,9 @@ def get_incident(incident_id: str) -> dict[str, Any] | None:
             res = client.table("incidents").select("*").eq("id", incident_id).single().execute()
             return res.data
         except Exception as e:
-            logger.warning("Failed to fetch incident from Supabase: %s", e)
-    return _memory_incidents.get(incident_id)
+            if not _mock_enabled():
+                raise RuntimeError(f"Supabase incident fetch failed: {e}") from e
+            logger.warning("Using explicit mock store after incident fetch failure: %s", e)
+    if _mock_enabled():
+        return _memory_incidents.get(incident_id)
+    raise RuntimeError("In-memory database is disabled")
