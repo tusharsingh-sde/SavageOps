@@ -18,8 +18,14 @@ def _positive_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+LLM_TRIAGE = os.getenv("LLM_TRIAGE", "gemini:gemini-3.5-flash-lite,mistral:mistral-small-latest")
+LLM_ANALYST = os.getenv("LLM_ANALYST", "gemini:gemini-3.8-flash,mistral:mistral-large-latest")
+LLM_FIXER = os.getenv("LLM_FIXER", "mistral:devstral-2-2512,gemini:gemini-3.8-flash")
+LLM_SPOKESPERSON = os.getenv("LLM_SPOKESPERSON", "groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 TARGET_REPO = os.getenv("TARGET_REPO", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -57,12 +63,10 @@ GROUP_COOLDOWN_SECONDS = _positive_int("GROUP_COOLDOWN_SECONDS", 60)
 
 
 def validate_startup_config() -> None:
-    """Validate required production secrets only when the API server starts."""
+    """Validate required production secrets and LLM configuration only when the API server starts."""
     if APP_ENV != "production":
         return
     required = {
-        "OPENAI_API_KEY": OPENAI_API_KEY,
-        "OPENAI_MODEL": OPENAI_MODEL,
         "GITHUB_TOKEN": GITHUB_TOKEN,
         "TARGET_REPO": TARGET_REPO,
         "SUPABASE_URL": SUPABASE_URL,
@@ -75,5 +79,29 @@ def validate_startup_config() -> None:
     missing = [name for name, value in required.items() if not value]
     if not ADMIN_USER_IDS:
         missing.append("ADMIN_USER_IDS")
+
+    # Validate provider keys for configured chains
+    provider_keys = {
+        "gemini": "GEMINI_API_KEY",
+        "mistral": "MISTRAL_API_KEY",
+        "groq": "GROQ_API_KEY",
+    }
+    for role, chain_str in [
+        ("triage", LLM_TRIAGE),
+        ("analyst", LLM_ANALYST),
+        ("fixer", LLM_FIXER),
+        ("spokesperson", LLM_SPOKESPERSON),
+    ]:
+        for item in chain_str.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            prov = item.split(":", 1)[0].strip().lower()
+            if prov not in provider_keys:
+                raise RuntimeError(f"Unknown provider '{prov}' in LLM_{role.upper()}")
+            key_name = provider_keys[prov]
+            if not os.getenv(key_name, "") and key_name not in missing:
+                missing.append(key_name)
+
     if missing:
         raise RuntimeError("Missing required production configuration: " + ", ".join(missing))

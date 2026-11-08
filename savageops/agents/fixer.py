@@ -12,9 +12,10 @@ from collections import Counter
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from savageops.config import MAX_DIFF_LINES, OPENAI_MODEL
+from savageops.config import MAX_DIFF_LINES
 from savageops.db import get_incident, log_run, update_incident
-from savageops.llm import create_chat_model, invoke_guarded
+from savageops.llm import get_llm as _get_llm_chain
+from savageops.llm import invoke_guarded
 from savageops.models import FixedFile
 from savageops.security import redact_untrusted_text
 from savageops.tools.github_tools import (
@@ -55,7 +56,7 @@ prompt = ChatPromptTemplate.from_messages(
 
 
 def get_llm():
-    return create_chat_model(OPENAI_MODEL).with_structured_output(FixedFile)
+    return _get_llm_chain("fixer", schema=FixedFile)
 
 
 def apply_hunks(original: str, hunks: list) -> str:

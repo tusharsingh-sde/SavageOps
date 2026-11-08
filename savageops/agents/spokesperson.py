@@ -2,9 +2,9 @@
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from savageops.config import OPENAI_MODEL
 from savageops.db import log_run
-from savageops.llm import create_chat_model, invoke_guarded
+from savageops.llm import get_llm as _get_llm_chain
+from savageops.llm import invoke_guarded
 from savageops.models import SavageSummary
 from savageops.security import redact_untrusted_text
 
@@ -27,7 +27,7 @@ prompt = ChatPromptTemplate.from_messages(
 
 
 def get_llm():
-    return create_chat_model(OPENAI_MODEL, temperature=0.7).with_structured_output(SavageSummary)
+    return _get_llm_chain("spokesperson", schema=SavageSummary, temperature=0.7)
 
 
 def run_spokesperson(incident_id: str, triage: dict, analysis: dict) -> SavageSummary:

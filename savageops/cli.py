@@ -42,6 +42,11 @@ def main():
         "init", help="Generate local templates directory with docker-compose and configs"
     )
 
+    # 5. models command
+    subparsers.add_parser(
+        "models", help="List model IDs from configured LLM providers and verify chains"
+    )
+
     args = parser.parse_args()
 
     if args.cmd == "run":
@@ -86,6 +91,34 @@ def main():
             packaged_env.replace(dest / ".env.example")
         print(f"[OK] savageops-config/ created at {dest.resolve()}")
         print("Included: .env.example, docker-compose.yml, and Grafana provisioning configs.")
+
+    elif args.cmd == "models":
+        from savageops.llm import check_chain_models, list_provider_models
+
+        print("\n=== Configured LLM Provider Models ===")
+        models_by_provider = list_provider_models()
+        for prov, models in models_by_provider.items():
+            if not models:
+                print(f"\n[{prov.upper()}] (No models returned or provider key not configured)")
+            else:
+                print(f"\n[{prov.upper()}] ({len(models)} models available):")
+                for m_id in models:
+                    print(f"  - {m_id}")
+
+        print("\n=== Model Chain Verifications ===")
+        chain_checks = check_chain_models()
+        has_flags = False
+        for chk in chain_checks:
+            role = chk["role"]
+            entry = chk["entry"]
+            status = chk["status"]
+            if "FLAG" in status:
+                has_flags = True
+                print(f"[FLAG] {role:13} -> {entry:35} : {status}")
+            else:
+                print(f"[OK]   {role:13} -> {entry:35} : {status}")
+        print("======================================\n")
+        sys.exit(1 if has_flags else 0)
 
 
 if __name__ == "__main__":

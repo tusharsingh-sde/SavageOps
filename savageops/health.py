@@ -4,7 +4,6 @@ import time
 
 import httpx
 from fastapi import APIRouter, Depends
-from openai import OpenAI
 
 from savageops.auth import require_admin
 from savageops.config import (
@@ -12,11 +11,11 @@ from savageops.config import (
     GRAFANA_URL,
     LOKI_DATASOURCE_UID,
     LOKI_URL,
-    OPENAI_API_KEY,
     POLL_ENABLED,
     POLL_INTERVAL_SECONDS,
 )
 from savageops.db import db
+from savageops.llm import PROVIDERS
 from savageops.sentinel.poller import state as poller_state
 from savageops.tools.github_tools import _get_client_and_repo
 
@@ -50,12 +49,34 @@ def run_checks() -> dict[str, str]:
 
     check("github", _check_github)
 
-    # 3. OpenAI check
-    def _check_openai():
-        client = OpenAI(api_key=OPENAI_API_KEY or "dummy")
-        _ = client.models.list()
+    # 3. LLM provider checks (pings configured providers with max_tokens=5)
+    default_ping_models = {
+        "gemini": "gemini-3.5-flash-lite",
+        "mistral": "mistral-small-latest",
+        "groq": "openai/gpt-oss-120b",
+    }
+    import os
 
-    check("openai", _check_openai)
+    for prov, cfg in PROVIDERS.items():
+        key_var = cfg["env_key"]
+        api_key = os.getenv(key_var, "").strip()
+        if not api_key:
+            checks[f"llm_{prov}"] = f"not_configured: {key_var} not set"
+        else:
+            def _make_ping(p=prov, c=cfg, k=api_key):
+                def _do_ping():
+                    from openai import OpenAI
+
+                    client = OpenAI(api_key=k, base_url=c["base_url"], timeout=10)
+                    model = default_ping_models.get(p, "default")
+                    client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": "ping"}],
+                        max_tokens=5,
+                    )
+                return _do_ping
+
+            check(f"llm_{prov}", _make_ping())
 
     # 4. Grafana check
     if GRAFANA_URL and "localhost" not in GRAFANA_URL and not GRAFANA_TOKEN:

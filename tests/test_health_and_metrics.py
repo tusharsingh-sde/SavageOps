@@ -15,7 +15,9 @@ def test_health_run_checks_structure():
     assert isinstance(res, dict)
     assert "supabase" in res
     assert "github" in res
-    assert "openai" in res
+    assert "llm_gemini" in res
+    assert "llm_mistral" in res
+    assert "llm_groq" in res
     assert "grafana" in res
     assert "loki" in res
 

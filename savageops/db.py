@@ -174,6 +174,13 @@ def log_run(
     inp: dict | None = None,
     out: dict | None = None,
     error: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    role: str | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    latency: float = 0.0,
+    fallback_depth: int = 0,
 ) -> None:
     """Log an agent interaction to the agent_runs table or memory fallback."""
     incident = get_incident(incident_id)
@@ -192,6 +199,13 @@ def log_run(
         "input": redact_untrusted_data(inp),
         "output": redact_untrusted_data(out),
         "error": redact_untrusted_data(error),
+        "provider": provider,
+        "model": model,
+        "role": role or agent,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "latency": latency,
+        "fallback_depth": fallback_depth,
     }
     client = get_db()
     if client:
