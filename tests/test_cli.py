@@ -27,6 +27,8 @@ def test_cli_models_and_doctor_subcommand_help():
         )
         assert res.returncode == 0
         assert subcmd in res.stdout
+        if subcmd == "models":
+            assert "--all" in res.stdout
 
 
 def test_cli_init(tmp_path):

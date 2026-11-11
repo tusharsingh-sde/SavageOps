@@ -44,8 +44,13 @@ def main():
     )
 
     # 5. models command
-    subparsers.add_parser(
+    models_parser = subparsers.add_parser(
         "models", help="List model IDs from configured LLM providers and verify chains"
+    )
+    models_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Print full list of model IDs returned by each provider",
     )
 
     args = parser.parse_args()
@@ -56,7 +61,8 @@ def main():
     elif args.cmd == "doctor":
         from savageops.health import run_checks
 
-        res = run_checks(ping_llms=True)
+        llm_details: dict = {}
+        res = run_checks(ping_llms=True, llm_details=llm_details)
         print("\n=== SavageOps System Diagnostics ===")
         for name, status_val in res.items():
             icon = (
@@ -68,7 +74,19 @@ def main():
                 if status_val == "starting"
                 else "[FAIL]"
             )
-            msg = "" if status_val in ("ok", "fixture_mode") else f"({status_val})"
+            detail = llm_details.get(name)
+            if detail:
+                target = detail["target"]
+                latency_ms = detail["latency_ms"]
+                if status_val == "ok":
+                    listed_note = (
+                        "" if detail.get("listed") else " - OK (model not listed)"
+                    )
+                    msg = f"({target}, {latency_ms}ms{listed_note})"
+                else:
+                    msg = f"({target}, {latency_ms}ms, {status_val})"
+            else:
+                msg = "" if status_val in ("ok", "fixture_mode") else f"({status_val})"
             print(f"{icon:7} {name:15} {msg}")
 
         all_ok = all(
@@ -109,21 +127,24 @@ def main():
         print("\n=== Configured LLM Provider Models ===")
         used_providers = get_used_providers()
         models_by_provider = list_provider_models()
+        show_all = bool(getattr(args, "all", False))
         has_flags = False
         for prov, models in models_by_provider.items():
             key_var = PROVIDERS[prov]["env_key"]
             has_key = bool(os.getenv(key_var, "").strip())
             if not has_key and prov not in used_providers:
-                print(f"\n[{prov.upper()}] skipped ({key_var} not set)")
+                print(f"[{prov.upper()}] skipped ({key_var} not set)")
             elif not has_key and prov in used_providers:
                 has_flags = True
-                print(f"\n[{prov.upper()}] [FAIL] Missing required key {key_var}")
+                print(f"[{prov.upper()}] [FAIL] Missing required key {key_var}")
             elif not models:
-                print(f"\n[{prov.upper()}] (No models returned)")
-            else:
+                print(f"[{prov.upper()}] 0 models available (no models returned)")
+            elif show_all:
                 print(f"\n[{prov.upper()}] ({len(models)} models available):")
                 for m_id in models:
                     print(f"  - {m_id}")
+            else:
+                print(f"[{prov.upper()}] {len(models)} models available")
 
         print("\n=== Model Chain Verifications ===")
         chain_checks = check_chain_models(available_models=models_by_provider)

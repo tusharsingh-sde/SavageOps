@@ -304,7 +304,32 @@ def get_limiter(provider: str) -> ProviderRateLimiter:
     return limiter
 
 
-def parse_chain(role: str, require_keys: bool = True) -> list[tuple[str, str]]:
+def normalize_model_id(provider: str, model_id: str) -> str:
+    """Normalize provider-specific model ID prefixes for consistent comparison."""
+    mid = model_id.strip()
+    if provider == "gemini":
+        return mid.removeprefix("models/")
+    return mid
+
+
+def validate_openrouter_model(provider: str, model: str, env_var: str) -> None:
+    """Reject non-':free' OpenRouter chain entries unless LLM_ALLOW_PAID=1."""
+    if provider != "openrouter" or model.endswith(":free"):
+        return
+    if os.getenv("LLM_ALLOW_PAID", "").strip() == "1":
+        return
+    entry = f"{provider}:{model}"
+    raise RuntimeError(
+        f"Paid OpenRouter model '{entry}' in {env_var} is rejected; "
+        "use a ':free' model or set LLM_ALLOW_PAID=1 to allow paid models"
+    )
+
+
+def parse_chain(
+    role: str,
+    require_keys: bool = True,
+    enforce_paid_guard: bool = True,
+) -> list[tuple[str, str]]:
     """Parse comma-separated provider:model string for role.
 
     Splits on the FIRST colon only so model IDs containing colons are preserved.
@@ -333,6 +358,8 @@ def parse_chain(role: str, require_keys: bool = True) -> list[tuple[str, str]]:
             )
         if prov not in PROVIDERS:
             raise RuntimeError(f"Unknown LLM provider '{prov}' in {env_var_name}")
+        if enforce_paid_guard:
+            validate_openrouter_model(prov, model, env_var_name)
         if require_keys:
             key_var = PROVIDERS[prov]["env_key"]
             key_val = os.getenv(key_var, "").strip()
@@ -349,7 +376,9 @@ def get_used_providers() -> set[str]:
     """Return provider names referenced in any configured LLM_* role chain."""
     used: set[str] = set()
     for role in DEFAULT_CHAINS:
-        for prov, _ in parse_chain(role, require_keys=False):
+        for prov, _ in parse_chain(
+            role, require_keys=False, enforce_paid_guard=False
+        ):
             used.add(prov)
     return used
 
@@ -357,7 +386,9 @@ def get_used_providers() -> set[str]:
 def get_primary_model_for_provider(provider: str) -> str:
     """Return the first configured chain model for provider, or a fallback model."""
     for role in DEFAULT_CHAINS:
-        for prov, model in parse_chain(role, require_keys=False):
+        for prov, model in parse_chain(
+            role, require_keys=False, enforce_paid_guard=False
+        ):
             if prov == provider:
                 return model
     fallback = {
@@ -733,7 +764,7 @@ def invoke_guarded(runnable: Any, inputs: dict, incident_id: str) -> Any:
 
 
 def list_provider_models() -> dict[str, list[str]]:
-    """List model IDs returned by each configured provider /models endpoint (names only)."""
+    """List normalized model IDs returned by each configured provider /models endpoint."""
     from openai import OpenAI
 
     results: dict[str, list[str]] = {}
@@ -745,7 +776,9 @@ def list_provider_models() -> dict[str, list[str]]:
         try:
             client = OpenAI(api_key=key, base_url=cfg["base_url"], timeout=15)
             models_resp = client.models.list()
-            ids = sorted([str(m.id) for m in models_resp.data])
+            ids = sorted(
+                {normalize_model_id(prov, str(m.id)) for m in models_resp.data}
+            )
             results[prov] = ids
         except Exception as e:
             logger.warning("Failed to fetch models from provider '%s': %s", prov, e)
@@ -756,7 +789,7 @@ def list_provider_models() -> dict[str, list[str]]:
 def check_chain_models(
     available_models: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Verify configured chain entries against model lists and flag missing entries."""
+    """Verify configured chain entries against normalized model lists and flag mismatches."""
     if available_models is None:
         available_models = list_provider_models()
     checks: list[dict[str, Any]] = []
@@ -772,13 +805,17 @@ def check_chain_models(
 
         for prov, model in chain:
             models_for_prov = available_models.get(prov, [])
+            normalized_available = {
+                normalize_model_id(prov, m) for m in models_for_prov
+            }
+            normalized_model = normalize_model_id(prov, model)
             key_var = PROVIDERS[prov]["env_key"]
             key = os.getenv(key_var, "").strip()
             if not key:
                 status = f"FLAG: missing {key_var}"
-            elif not models_for_prov:
+            elif not normalized_available:
                 status = "unverified (could not list models)"
-            elif model in models_for_prov:
+            elif normalized_model in normalized_available:
                 status = "ok"
             else:
                 status = f"FLAG: '{model}' not in provider model list"

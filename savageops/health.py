@@ -2,6 +2,7 @@
 
 import os
 import time
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -16,14 +17,22 @@ from savageops.config import (
     POLL_INTERVAL_SECONDS,
 )
 from savageops.db import db
-from savageops.llm import PROVIDERS, get_primary_model_for_provider, get_used_providers
+from savageops.llm import (
+    PROVIDERS,
+    get_primary_model_for_provider,
+    get_used_providers,
+    normalize_model_id,
+)
 from savageops.sentinel.poller import state as poller_state
 from savageops.tools.github_tools import _get_client_and_repo
 
 router = APIRouter(tags=["health"])
 
 
-def run_checks(ping_llms: bool = False) -> dict[str, str]:
+def run_checks(
+    ping_llms: bool = False,
+    llm_details: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, str]:
     """Execute full diagnostic checks against external dependencies and subsystems.
 
     LLM completion pings run ONLY when ping_llms=True (CLI doctor), never from /health/deep.
@@ -35,12 +44,15 @@ def run_checks(ping_llms: bool = False) -> dict[str, str]:
     checks: dict[str, str] = {}
     auth_header = {"Authorization": f"Bearer {GRAFANA_TOKEN}"} if GRAFANA_TOKEN else {}
 
-    def check(name: str, fn):
+    def check(name: str, fn, secret_to_mask: str = ""):
         try:
             fn()
             checks[name] = "ok"
         except Exception as e:
-            checks[name] = f"fail: {str(e)[:120]}"
+            err_msg = str(e)
+            if secret_to_mask:
+                err_msg = err_msg.replace(secret_to_mask, "***")
+            checks[name] = f"fail: {err_msg[:120]}"
 
     # 1. Supabase check
     check("supabase", lambda: db.table("incidents").select("id").limit(1).execute())
@@ -72,15 +84,44 @@ def run_checks(ping_llms: bool = False) -> dict[str, str]:
 
                     client = OpenAI(api_key=k, base_url=c["base_url"], timeout=15)
                     model = get_primary_model_for_provider(p)
-                    client.chat.completions.create(
-                        model=model,
-                        messages=[{"role": "user", "content": "ping"}],
-                        max_tokens=5,
-                    )
+                    target = f"{p}:{model}"
+                    listed = False
+                    t0 = time.perf_counter()
+                    try:
+                        client.chat.completions.create(
+                            model=model,
+                            messages=[{"role": "user", "content": "ping"}],
+                            max_tokens=5,
+                        )
+                    finally:
+                        latency_ms = int(round((time.perf_counter() - t0) * 1000))
+                        if llm_details is not None:
+                            llm_details[f"llm_{p}"] = {
+                                "target": target,
+                                "latency_ms": latency_ms,
+                                "listed": False,
+                            }
+
+                    try:
+                        models_resp = client.models.list()
+                        listed_ids = {
+                            normalize_model_id(p, str(m.id))
+                            for m in models_resp.data
+                        }
+                        listed = normalize_model_id(p, model) in listed_ids
+                    except Exception:
+                        listed = False
+
+                    if llm_details is not None:
+                        llm_details[f"llm_{p}"] = {
+                            "target": target,
+                            "latency_ms": latency_ms,
+                            "listed": listed,
+                        }
 
                 return _do_ping
 
-            check(f"llm_{prov}", _make_ping())
+            check(f"llm_{prov}", _make_ping(), secret_to_mask=api_key)
 
     # 4. Grafana check
     if GRAFANA_URL and "localhost" not in GRAFANA_URL and not GRAFANA_TOKEN:

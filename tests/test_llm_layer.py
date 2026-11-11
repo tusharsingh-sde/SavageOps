@@ -49,6 +49,7 @@ def setup_dummy_keys(monkeypatch):
         "LLM_TEMPERATURE_FIXER",
         "LLM_TEMPERATURE_SPOKESPERSON",
         "LLM_TEMP_GEMINI",
+        "LLM_ALLOW_PAID",
     ):
         monkeypatch.delenv(var, raising=False)
     for prov in PROVIDERS:
@@ -579,3 +580,263 @@ def test_cli_models_check():
         checks = llm_module.check_chain_models()
         assert len(checks) == 8
         assert all("FLAG" not in c["status"] for c in checks)
+
+
+# 9. Phase 2c Small Fixes Tests
+def test_models_normalizes_gemini_models_prefix():
+    mock_gemini_models = MagicMock()
+    mock_gemini_models.data = [
+        MagicMock(id="models/gemini-3.5-flash-lite"),
+        MagicMock(id="models/gemini-3.6-flash"),
+        MagicMock(id="models/gemini-3.8-flash"),
+    ]
+    mock_openrouter_models = MagicMock()
+    mock_openrouter_models.data = [
+        MagicMock(id="openai/gpt-oss-120b:free"),
+        MagicMock(id="qwen/qwen3-coder:free"),
+    ]
+    mock_groq_models = MagicMock()
+    mock_groq_models.data = [MagicMock(id="openai/gpt-oss-120b")]
+
+    def fake_openai(api_key, base_url, timeout):
+        client = MagicMock()
+        if "google" in base_url:
+            client.models.list.return_value = mock_gemini_models
+        elif "openrouter" in base_url:
+            client.models.list.return_value = mock_openrouter_models
+        elif "groq" in base_url:
+            client.models.list.return_value = mock_groq_models
+        else:
+            client.models.list.return_value = MagicMock(data=[])
+        return client
+
+    with patch("openai.OpenAI", side_effect=fake_openai):
+        listed = llm_module.list_provider_models()
+        assert "gemini-3.8-flash" in listed["gemini"]
+        assert "models/gemini-3.8-flash" not in listed["gemini"]
+
+        checks = llm_module.check_chain_models()
+        assert len(checks) == 8
+        assert all(c["status"] == "ok" for c in checks)
+
+    # Also verify check_chain_models normalizes if passed raw "models/..." IDs directly
+    direct_checks = llm_module.check_chain_models(
+        available_models={
+            "gemini": [
+                "models/gemini-3.5-flash-lite",
+                "models/gemini-3.6-flash",
+                "models/gemini-3.8-flash",
+            ],
+            "groq": ["openai/gpt-oss-120b"],
+            "openrouter": ["openai/gpt-oss-120b:free", "qwen/qwen3-coder:free"],
+        }
+    )
+    assert len(direct_checks) == 8
+    assert all(c["status"] == "ok" for c in direct_checks)
+
+
+def test_cli_models_default_counts_only_and_all_flag(capsys, monkeypatch):
+    import savageops.cli as cli_mod
+
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    sample_models = {
+        "gemini": [
+            "gemini-3.5-flash-lite",
+            "gemini-3.6-flash",
+            "gemini-3.8-flash",
+            "gemini-extra-unchained",
+        ],
+        "mistral": [],
+        "groq": ["openai/gpt-oss-120b", "groq-extra-unchained"],
+        "openrouter": ["openai/gpt-oss-120b:free", "qwen/qwen3-coder:free"],
+    }
+
+    with (
+        patch.object(llm_module, "list_provider_models", return_value=sample_models),
+        patch.object(sys, "argv", ["savageops", "models"]),
+    ):
+        with pytest.raises(SystemExit) as exit_info:
+            cli_mod.main()
+        assert exit_info.value.code == 0
+
+    default_out = capsys.readouterr().out
+    assert "[GEMINI] 4 models available" in default_out
+    assert "[GROQ] 2 models available" in default_out
+    assert "[OPENROUTER] 2 models available" in default_out
+    assert "[MISTRAL] skipped" in default_out
+    assert "=== Model Chain Verifications ===" in default_out
+    assert "gemini-extra-unchained" not in default_out
+    assert "groq-extra-unchained" not in default_out
+    assert "  - gemini-3.8-flash" not in default_out
+
+    with (
+        patch.object(llm_module, "list_provider_models", return_value=sample_models),
+        patch.object(sys, "argv", ["savageops", "models", "--all"]),
+    ):
+        with pytest.raises(SystemExit) as exit_info:
+            cli_mod.main()
+        assert exit_info.value.code == 0
+
+    all_out = capsys.readouterr().out
+    assert "gemini-extra-unchained" in all_out
+    assert "groq-extra-unchained" in all_out
+    assert "  - gemini-3.8-flash" in all_out
+    assert "=== Model Chain Verifications ===" in all_out
+
+
+def test_openrouter_paid_model_guard_startup_and_override(monkeypatch):
+    import savageops.config as cfg_mod
+
+    monkeypatch.setenv("LLM_FIXER", "openrouter:openai/gpt-4o,gemini:gemini-3.8-flash")
+    monkeypatch.delenv("LLM_ALLOW_PAID", raising=False)
+
+    # Rejected at startup even when APP_ENV != production
+    with pytest.raises(RuntimeError, match="openrouter:openai/gpt-4o"):
+        cfg_mod.validate_startup_config()
+
+    # Rejected at parse_chain runtime as well
+    with pytest.raises(RuntimeError, match="openrouter:openai/gpt-4o"):
+        parse_chain("fixer")
+
+    # Explicit LLM_ALLOW_PAID=0 still rejects
+    monkeypatch.setenv("LLM_ALLOW_PAID", "0")
+    with pytest.raises(RuntimeError, match="openrouter:openai/gpt-4o"):
+        cfg_mod.validate_startup_config()
+
+    # Allowed when LLM_ALLOW_PAID=1
+    monkeypatch.setenv("LLM_ALLOW_PAID", "1")
+    cfg_mod.validate_startup_config()
+    parsed = parse_chain("fixer")
+    assert parsed == [("openrouter", "openai/gpt-4o"), ("gemini", "gemini-3.8-flash")]
+
+
+def test_env_examples_have_phase2c_chains():
+    repo_root = Path(__file__).resolve().parent.parent
+    expected_lines = [
+        "LLM_TRIAGE=gemini:gemini-3.5-flash-lite,gemini:gemini-3.6-flash",
+        "LLM_ANALYST=gemini:gemini-3.8-flash,openrouter:nvidia/nemotron-3-ultra-550b-a55b:free",
+        "LLM_FIXER=openrouter:cohere/north-mini-code:free,groq:qwen/qwen3.8-27b,gemini:gemini-3.8-flash",
+        "LLM_SPOKESPERSON=groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite",
+    ]
+    for rel_path in (".env.example", "savageops/templates/env.example"):
+        text = (repo_root / rel_path).read_text(encoding="utf-8")
+        for line in expected_lines:
+            assert line in text, f"Missing '{line}' in {rel_path}"
+        assert "LLM_TEMP_GEMINI" in text
+        assert '"true"' in text and "number" in text
+
+
+def test_cli_doctor_prints_provider_model_latency_and_unlisted_marker(
+    capsys, monkeypatch
+):
+    import re
+
+    import savageops.cli as cli_mod
+
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "secret-gem-key-123")
+    monkeypatch.setenv("GROQ_API_KEY", "secret-groq-key-456")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret-or-key-789")
+
+    def fake_openai_doctor(api_key, base_url, timeout):
+        client = MagicMock()
+        client.chat.completions.create.return_value = MagicMock()
+        if "google" in base_url:
+            client.models.list.return_value = MagicMock(
+                data=[MagicMock(id="models/gemini-3.5-flash-lite")]
+            )
+        elif "groq" in base_url:
+            # Pinged model ("openai/gpt-oss-120b") intentionally absent from /models
+            client.models.list.return_value = MagicMock(
+                data=[MagicMock(id="some-other-groq-model")]
+            )
+        elif "openrouter" in base_url:
+            client.models.list.return_value = MagicMock(
+                data=[MagicMock(id="openai/gpt-oss-120b:free")]
+            )
+        else:
+            client.models.list.return_value = MagicMock(data=[])
+        return client
+
+    with (
+        patch("openai.OpenAI", side_effect=fake_openai_doctor),
+        patch("savageops.health.db") as mock_db,
+        patch(
+            "savageops.health._get_client_and_repo",
+            return_value=(MagicMock(), MagicMock(default_branch="main")),
+        ),
+        patch(
+            "savageops.health.httpx.get",
+            return_value=MagicMock(raise_for_status=MagicMock()),
+        ),
+        patch("savageops.health.LOKI_URL", ""),
+        patch("savageops.health.GRAFANA_TOKEN", ""),
+        patch("savageops.health.GRAFANA_URL", "https://grafana.example.com"),
+        patch.object(sys, "argv", ["savageops", "doctor"]),
+    ):
+        mock_db.table.return_value.select.return_value.limit.return_value.execute.return_value = MagicMock()
+        with pytest.raises(SystemExit) as exit_info:
+            cli_mod.main()
+        assert exit_info.value.code == 0
+
+    doc_out = capsys.readouterr().out
+    assert "secret-gem-key-123" not in doc_out
+    assert "secret-groq-key-456" not in doc_out
+    assert "secret-or-key-789" not in doc_out
+
+    gem_line = next(line for line in doc_out.splitlines() if "llm_gemini" in line)
+    assert re.search(r"gemini:gemini-3\.5-flash-lite,\s*\d+ms", gem_line)
+    assert "OK (model not listed)" not in gem_line
+
+    groq_line = next(line for line in doc_out.splitlines() if "llm_groq" in line)
+    assert re.search(r"groq:openai/gpt-oss-120b,\s*\d+ms", groq_line)
+    assert "OK (model not listed)" in groq_line
+
+    or_line = next(line for line in doc_out.splitlines() if "llm_openrouter" in line)
+    assert re.search(r"openrouter:openai/gpt-oss-120b:free,\s*\d+ms", or_line)
+    assert "OK (model not listed)" not in or_line
+
+    mistral_line = next(line for line in doc_out.splitlines() if "llm_mistral" in line)
+    assert "[SKIP]" in mistral_line and "skipped" in mistral_line
+
+    # Verify ping error also masks any echoed key in doctor output
+    def fake_openai_fail_echo(api_key, base_url, timeout):
+        client = MagicMock()
+        if "groq" in base_url:
+            client.chat.completions.create.side_effect = RuntimeError(
+                f"Unauthorized key={api_key}"
+            )
+        else:
+            client.chat.completions.create.return_value = MagicMock()
+            client.models.list.return_value = MagicMock(
+                data=[
+                    MagicMock(id="gemini-3.5-flash-lite"),
+                    MagicMock(id="openai/gpt-oss-120b:free"),
+                ]
+            )
+        return client
+
+    with (
+        patch("openai.OpenAI", side_effect=fake_openai_fail_echo),
+        patch("savageops.health.db") as mock_db,
+        patch(
+            "savageops.health._get_client_and_repo",
+            return_value=(MagicMock(), MagicMock(default_branch="main")),
+        ),
+        patch(
+            "savageops.health.httpx.get",
+            return_value=MagicMock(raise_for_status=MagicMock()),
+        ),
+        patch("savageops.health.LOKI_URL", ""),
+        patch("savageops.health.GRAFANA_TOKEN", ""),
+        patch("savageops.health.GRAFANA_URL", "https://grafana.example.com"),
+        patch.object(sys, "argv", ["savageops", "doctor"]),
+    ):
+        mock_db.table.return_value.select.return_value.limit.return_value.execute.return_value = MagicMock()
+        with pytest.raises(SystemExit) as exit_info:
+            cli_mod.main()
+        assert exit_info.value.code == 1
+
+    fail_out = capsys.readouterr().out
+    assert "secret-groq-key-456" not in fail_out
+    assert "***" in fail_out

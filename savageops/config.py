@@ -68,9 +68,18 @@ GROUP_COOLDOWN_SECONDS = _positive_int("GROUP_COOLDOWN_SECONDS", 60)
 
 
 def validate_startup_config() -> None:
-    """Validate required production secrets and LLM configuration only when the API server starts."""
+    """Validate LLM chains/paid guard on startup, and required secrets in production."""
+    from savageops.llm import DEFAULT_CHAINS, PROVIDERS, parse_chain
+
+    used_providers: list[str] = []
+    for role in DEFAULT_CHAINS:
+        for prov, _ in parse_chain(role, require_keys=False, enforce_paid_guard=True):
+            if prov not in used_providers:
+                used_providers.append(prov)
+
     if APP_ENV != "production":
         return
+
     required = {
         "GITHUB_TOKEN": GITHUB_TOKEN,
         "TARGET_REPO": TARGET_REPO,
@@ -86,31 +95,10 @@ def validate_startup_config() -> None:
         missing.append("ADMIN_USER_IDS")
 
     # Validate provider keys ONLY for providers referenced in configured LLM_* chains
-    from savageops.llm import DEFAULT_CHAINS, PROVIDERS
-
-    for role, default_chain in DEFAULT_CHAINS.items():
-        env_var = f"LLM_{role.upper()}"
-        chain_str = os.getenv(env_var, "").strip() or default_chain
-        for item in chain_str.split(","):
-            item = item.strip()
-            if not item:
-                continue
-            if ":" not in item:
-                raise RuntimeError(
-                    f"Invalid chain format in {env_var}: '{item}' (expected provider:model)"
-                )
-            prov, model = item.split(":", 1)
-            prov = prov.strip().lower()
-            model = model.strip()
-            if not prov or not model:
-                raise RuntimeError(
-                    f"Invalid chain format in {env_var}: '{item}' (expected provider:model)"
-                )
-            if prov not in PROVIDERS:
-                raise RuntimeError(f"Unknown provider '{prov}' in {env_var}")
-            key_name = PROVIDERS[prov]["env_key"]
-            if not os.getenv(key_name, "").strip() and key_name not in missing:
-                missing.append(key_name)
+    for prov in used_providers:
+        key_name = PROVIDERS[prov]["env_key"]
+        if not os.getenv(key_name, "").strip() and key_name not in missing:
+            missing.append(key_name)
 
     if missing:
         raise RuntimeError("Missing required production configuration: " + ", ".join(missing))

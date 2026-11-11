@@ -26,6 +26,7 @@ for _llm_var in (
     "LLM_TEMPERATURE_FIXER",
     "LLM_TEMPERATURE_SPOKESPERSON",
     "LLM_TEMP_GEMINI",
+    "LLM_ALLOW_PAID",
 ):
     if os.environ.get(_llm_var) == "dummy":
         os.environ.pop(_llm_var, None)
