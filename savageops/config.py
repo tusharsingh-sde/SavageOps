@@ -21,11 +21,16 @@ def _positive_int(name: str, default: int) -> int:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
-LLM_TRIAGE = os.getenv("LLM_TRIAGE", "gemini:gemini-3.5-flash-lite,mistral:mistral-small-latest")
-LLM_ANALYST = os.getenv("LLM_ANALYST", "gemini:gemini-3.8-flash,mistral:mistral-large-latest")
-LLM_FIXER = os.getenv("LLM_FIXER", "mistral:devstral-2-2512,gemini:gemini-3.8-flash")
-LLM_SPOKESPERSON = os.getenv("LLM_SPOKESPERSON", "groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite")
+LLM_TRIAGE = os.getenv("LLM_TRIAGE", "gemini:gemini-3.5-flash-lite,gemini:gemini-3.6-flash")
+LLM_ANALYST = os.getenv(
+    "LLM_ANALYST", "gemini:gemini-3.8-flash,openrouter:openai/gpt-oss-120b:free"
+)
+LLM_FIXER = os.getenv("LLM_FIXER", "openrouter:qwen/qwen3-coder:free,gemini:gemini-3.8-flash")
+LLM_SPOKESPERSON = os.getenv(
+    "LLM_SPOKESPERSON", "groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite"
+)
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 TARGET_REPO = os.getenv("TARGET_REPO", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -80,27 +85,31 @@ def validate_startup_config() -> None:
     if not ADMIN_USER_IDS:
         missing.append("ADMIN_USER_IDS")
 
-    # Validate provider keys for configured chains
-    provider_keys = {
-        "gemini": "GEMINI_API_KEY",
-        "mistral": "MISTRAL_API_KEY",
-        "groq": "GROQ_API_KEY",
-    }
-    for role, chain_str in [
-        ("triage", LLM_TRIAGE),
-        ("analyst", LLM_ANALYST),
-        ("fixer", LLM_FIXER),
-        ("spokesperson", LLM_SPOKESPERSON),
-    ]:
+    # Validate provider keys ONLY for providers referenced in configured LLM_* chains
+    from savageops.llm import DEFAULT_CHAINS, PROVIDERS
+
+    for role, default_chain in DEFAULT_CHAINS.items():
+        env_var = f"LLM_{role.upper()}"
+        chain_str = os.getenv(env_var, "").strip() or default_chain
         for item in chain_str.split(","):
             item = item.strip()
             if not item:
                 continue
-            prov = item.split(":", 1)[0].strip().lower()
-            if prov not in provider_keys:
-                raise RuntimeError(f"Unknown provider '{prov}' in LLM_{role.upper()}")
-            key_name = provider_keys[prov]
-            if not os.getenv(key_name, "") and key_name not in missing:
+            if ":" not in item:
+                raise RuntimeError(
+                    f"Invalid chain format in {env_var}: '{item}' (expected provider:model)"
+                )
+            prov, model = item.split(":", 1)
+            prov = prov.strip().lower()
+            model = model.strip()
+            if not prov or not model:
+                raise RuntimeError(
+                    f"Invalid chain format in {env_var}: '{item}' (expected provider:model)"
+                )
+            if prov not in PROVIDERS:
+                raise RuntimeError(f"Unknown provider '{prov}' in {env_var}")
+            key_name = PROVIDERS[prov]["env_key"]
+            if not os.getenv(key_name, "").strip() and key_name not in missing:
                 missing.append(key_name)
 
     if missing:

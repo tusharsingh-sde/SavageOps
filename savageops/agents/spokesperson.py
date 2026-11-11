@@ -27,7 +27,7 @@ prompt = ChatPromptTemplate.from_messages(
 
 
 def get_llm():
-    return _get_llm_chain("spokesperson", schema=SavageSummary, temperature=0.7)
+    return _get_llm_chain("spokesperson", schema=SavageSummary)
 
 
 def run_spokesperson(incident_id: str, triage: dict, analysis: dict) -> SavageSummary:

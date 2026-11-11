@@ -11,6 +11,9 @@ from savageops.watchdog import send_alert
 
 
 def test_health_run_checks_structure():
+    import savageops.health as health_mod
+
+    health_mod._checks_cache = None
     res = run_checks()
     assert isinstance(res, dict)
     assert "supabase" in res
@@ -18,8 +21,38 @@ def test_health_run_checks_structure():
     assert "llm_gemini" in res
     assert "llm_mistral" in res
     assert "llm_groq" in res
+    assert "llm_openrouter" in res
     assert "grafana" in res
     assert "loki" in res
+
+
+def test_deep_health_does_not_call_llm(monkeypatch):
+    import savageops.health as health_mod
+    from savageops.auth import require_admin
+
+    health_mod._checks_cache = None
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-gemini")
+    monkeypatch.setenv("GROQ_API_KEY", "dummy-groq")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-openrouter")
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+    app.dependency_overrides[require_admin] = lambda: {"sub": "admin-test"}
+    try:
+        with (
+            patch("openai.OpenAI", side_effect=AssertionError("OpenAI must not be called by /health/deep")),
+            patch("savageops.llm.ChatOpenAI", side_effect=AssertionError("ChatOpenAI must not be called by /health/deep")),
+        ):
+            client = TestClient(app)
+            r = client.get("/health/deep")
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["checks"]["llm_gemini"] == "configured"
+    assert body["checks"]["llm_groq"] == "configured"
+    assert body["checks"]["llm_openrouter"] == "configured"
+    assert body["checks"]["llm_mistral"] == "skipped"
 
 
 def test_metrics_instrumentation():

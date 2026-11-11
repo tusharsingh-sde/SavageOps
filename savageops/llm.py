@@ -30,35 +30,113 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "env_key": "GEMINI_API_KEY",
         "default_tpm": 1_000_000,
         "default_rpm": 60,
+        "default_rpd": None,
     },
     "mistral": {
         "base_url": "https://api.mistral.ai/v1",
         "env_key": "MISTRAL_API_KEY",
         "default_tpm": 500_000,
         "default_rpm": 60,
+        "default_rpd": None,
     },
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "env_key": "GROQ_API_KEY",
         "default_tpm": 8000,  # Requirement: Groq 8000 TPM
         "default_rpm": 30,
+        "default_rpd": None,
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "env_key": "OPENROUTER_API_KEY",
+        "default_tpm": 1_000_000,
+        "default_rpm": 20,  # Requirement: OpenRouter 20 RPM
+        "default_rpd": 50,  # Requirement: OpenRouter per-process 50 req/day cap
     },
 }
 
 DEFAULT_CHAINS: dict[str, str] = {
-    "triage": "gemini:gemini-3.5-flash-lite,mistral:mistral-small-latest",
-    "analyst": "gemini:gemini-3.8-flash,mistral:mistral-large-latest",
-    "fixer": "mistral:devstral-2-2512,gemini:gemini-3.8-flash",
+    "triage": "gemini:gemini-3.5-flash-lite,gemini:gemini-3.6-flash",
+    "analyst": "gemini:gemini-3.8-flash,openrouter:openai/gpt-oss-120b:free",
+    "fixer": "openrouter:qwen/qwen3-coder:free,gemini:gemini-3.8-flash",
     "spokesperson": "groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite",
 }
 
-REJECT_TEMPERATURE_PREFIXES = ("o1", "o3", "o4", "gpt-5", "devstral")
+DEFAULT_TEMPERATURES: dict[str, float] = {
+    "fixer": 0.1,
+    "triage": 0.1,
+    "analyst": 0.2,
+    "spokesperson": 0.7,
+}
+
+REJECT_TEMPERATURE_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+
+_temperature_rejected_lock = threading.Lock()
+_temperature_rejected_models: set[str] = set()
+
+
+def _remember_temperature_rejected(model: str) -> None:
+    with _temperature_rejected_lock:
+        _temperature_rejected_models.add(model.lower())
+
+
+def reset_temperature_rejections() -> None:
+    """Clear process-local cache of models that rejected temperature."""
+    with _temperature_rejected_lock:
+        _temperature_rejected_models.clear()
 
 
 def can_pass_temperature(model: str) -> bool:
     """Return True if model accepts a temperature parameter."""
     m = model.lower()
-    return not any(m.startswith(p) for p in REJECT_TEMPERATURE_PREFIXES)
+    if any(m.startswith(p) for p in REJECT_TEMPERATURE_PREFIXES):
+        return False
+    with _temperature_rejected_lock:
+        return m not in _temperature_rejected_models
+
+
+def resolve_temperature(
+    role: str,
+    provider: str,
+    model: str,
+    explicit_temperature: float | None = None,
+) -> float | None:
+    """Resolve effective temperature for role/provider/model, or None to omit."""
+    if not can_pass_temperature(model):
+        return None
+
+    env_name = f"LLM_TEMPERATURE_{role.upper()}"
+    env_val = os.getenv(env_name)
+    if env_val is not None:
+        stripped = env_val.strip()
+        if not stripped or stripped.lower() in ("none", "default", "unset", "off"):
+            role_temp: float | None = None
+        else:
+            try:
+                role_temp = float(stripped)
+            except ValueError as e:
+                raise RuntimeError(f"Invalid float value in {env_name}") from e
+    elif explicit_temperature is not None:
+        role_temp = explicit_temperature
+    else:
+        role_temp = DEFAULT_TEMPERATURES.get(role.lower())
+
+    # Gemini defaults to provider default (no temperature) unless LLM_TEMP_GEMINI is set.
+    if provider == "gemini":
+        gem_env = os.getenv("LLM_TEMP_GEMINI")
+        if gem_env is None:
+            return None
+        gem_str = gem_env.strip()
+        if not gem_str or gem_str.lower() in ("false", "no", "off", "none"):
+            return None
+        if gem_str.lower() in ("true", "yes", "on", "1"):
+            return role_temp
+        try:
+            return float(gem_str)
+        except ValueError as e:
+            raise RuntimeError("Invalid float value in LLM_TEMP_GEMINI") from e
+
+    return role_temp
 
 
 def estimate_tokens(prompt_input: Any) -> int:
@@ -82,37 +160,73 @@ def estimate_tokens(prompt_input: Any) -> int:
 
 
 class ProviderRateLimiter:
-    """Sliding-window rate limiter for tracking RPM and TPM per provider."""
+    """Sliding-window rate limiter tracking RPM, TPM, and optional daily request caps."""
 
-    def __init__(self, provider: str, tpm: int, rpm: int):
+    def __init__(
+        self,
+        provider: str,
+        tpm: int,
+        rpm: int,
+        rpd: int | None = None,
+    ):
         self.provider = provider
         self.tpm = tpm
         self.rpm = rpm
+        self.rpd = rpd
         self.lock = threading.Lock()
         self.history: deque[tuple[float, int]] = deque()
         self.throttled_until: float = 0.0
+        self.daily_date = datetime.now(UTC).date()
+        self.daily_calls: int = 0
+        self.daily_exhausted: bool = False
 
     def _prune(self, now: float) -> None:
         cutoff = now - 60.0
         while self.history and self.history[0][0] <= cutoff:
             self.history.popleft()
 
-    def can_accept(self, estimated_tokens: int) -> bool:
-        """Prompt-size guard: returns False if prompt exceeds TPM or remaining capacity."""
-        if estimated_tokens > self.tpm:
-            return False
+    def _prune_daily(self) -> None:
+        today = datetime.now(UTC).date()
+        if today != self.daily_date:
+            self.daily_date = today
+            self.daily_calls = 0
+            self.daily_exhausted = False
+
+    def rejection_reason(self, estimated_tokens: int) -> str | None:
+        """Return clear skip reason if request exceeds limits, else None."""
         with self.lock:
+            self._prune_daily()
+            if self.daily_exhausted or (
+                self.rpd is not None and self.daily_calls >= self.rpd
+            ):
+                cap = self.rpd if self.rpd is not None else "provider"
+                return f"daily cap ({cap}) reached for {self.provider}"
             now = time.monotonic()
             if now < self.throttled_until:
-                return False
+                return f"provider '{self.provider}' throttled by Retry-After"
+            if estimated_tokens > self.tpm:
+                return (
+                    f"prompt {estimated_tokens} tokens exceeds TPM limit {self.tpm}"
+                )
             self._prune(now)
             current_tokens = sum(tokens for _, tokens in self.history)
-            current_calls = len(self.history)
             if current_tokens + estimated_tokens > self.tpm:
-                return False
-            if current_calls + 1 > self.rpm:
-                return False
-            return True
+                return (
+                    f"prompt {estimated_tokens} tokens exceeds remaining TPM capacity ({self.tpm - current_tokens})"
+                )
+            if len(self.history) + 1 > self.rpm:
+                return f"RPM limit ({self.rpm}) reached for {self.provider}"
+            return None
+
+    def can_accept(self, estimated_tokens: int) -> bool:
+        """Return False if prompt exceeds TPM, RPM, daily cap, or Retry-After."""
+        return self.rejection_reason(estimated_tokens) is None
+
+    def record_attempt(self) -> None:
+        """Record an outgoing request attempt against the per-process daily count."""
+        with self.lock:
+            self._prune_daily()
+            self.daily_calls += 1
 
     def record_usage(self, actual_tokens: int) -> None:
         with self.lock:
@@ -122,12 +236,29 @@ class ProviderRateLimiter:
 
     def throttle(self, seconds: float) -> None:
         with self.lock:
-            self.throttled_until = max(self.throttled_until, time.monotonic() + seconds)
+            self.throttled_until = max(
+                self.throttled_until, time.monotonic() + seconds
+            )
+
+    def mark_daily_exhausted(self) -> None:
+        with self.lock:
+            self._prune_daily()
+            self.daily_exhausted = True
 
     def reset(self) -> None:
         with self.lock:
             self.history.clear()
             self.throttled_until = 0.0
+            self.daily_date = datetime.now(UTC).date()
+            self.daily_calls = 0
+            self.daily_exhausted = False
+
+
+def _default_rpd_for(provider: str) -> int | None:
+    rpd_env = os.getenv(f"{provider.upper()}_RPD")
+    if rpd_env is not None and rpd_env.strip():
+        return int(rpd_env)
+    return PROVIDERS.get(provider, {}).get("default_rpd")
 
 
 # Global provider rate limiters
@@ -136,6 +267,7 @@ _rate_limiters: dict[str, ProviderRateLimiter] = {
         p,
         int(os.getenv(f"{p.upper()}_TPM", str(cfg["default_tpm"]))),
         int(os.getenv(f"{p.upper()}_RPM", str(cfg["default_rpm"]))),
+        _default_rpd_for(p),
     )
     for p, cfg in PROVIDERS.items()
 }
@@ -144,6 +276,7 @@ _rate_limiters: dict[str, ProviderRateLimiter] = {
 def get_limiter(provider: str) -> ProviderRateLimiter:
     tpm_env = os.getenv(f"{provider.upper()}_TPM")
     rpm_env = os.getenv(f"{provider.upper()}_RPM")
+    rpd_env = os.getenv(f"{provider.upper()}_RPD")
     limiter = _rate_limiters.get(provider)
     if limiter is None:
         tpm = (
@@ -156,19 +289,25 @@ def get_limiter(provider: str) -> ProviderRateLimiter:
             if rpm_env
             else PROVIDERS.get(provider, {}).get("default_rpm", 60)
         )
-        limiter = ProviderRateLimiter(provider, tpm, rpm)
+        rpd = _default_rpd_for(provider)
+        limiter = ProviderRateLimiter(provider, tpm, rpm, rpd)
         _rate_limiters[provider] = limiter
     else:
         if tpm_env:
             limiter.tpm = int(tpm_env)
         if rpm_env:
             limiter.rpm = int(rpm_env)
+        if rpd_env is not None and rpd_env.strip():
+            limiter.rpd = int(rpd_env)
+        else:
+            limiter.rpd = PROVIDERS.get(provider, {}).get("default_rpd")
     return limiter
 
 
-def parse_chain(role: str) -> list[tuple[str, str]]:
+def parse_chain(role: str, require_keys: bool = True) -> list[tuple[str, str]]:
     """Parse comma-separated provider:model string for role.
 
+    Splits on the FIRST colon only so model IDs containing colons are preserved.
     Raises clear error naming only the variable if unknown provider or missing key.
     """
     env_var_name = f"LLM_{role.upper()}"
@@ -188,18 +327,55 @@ def parse_chain(role: str) -> list[tuple[str, str]]:
         prov, model = item.split(":", 1)
         prov = prov.strip().lower()
         model = model.strip()
+        if not prov or not model:
+            raise RuntimeError(
+                f"Invalid chain format in {env_var_name}: '{item}' (expected provider:model)"
+            )
         if prov not in PROVIDERS:
             raise RuntimeError(f"Unknown LLM provider '{prov}' in {env_var_name}")
-        # Verify provider API key exists
-        key_var = PROVIDERS[prov]["env_key"]
-        key_val = os.getenv(key_var, "").strip()
-        if not key_val:
-            raise RuntimeError(f"Missing required environment variable: {key_var}")
+        if require_keys:
+            key_var = PROVIDERS[prov]["env_key"]
+            key_val = os.getenv(key_var, "").strip()
+            if not key_val:
+                raise RuntimeError(f"Missing required environment variable: {key_var}")
         entries.append((prov, model))
 
     if not entries:
         raise RuntimeError(f"No valid model chain configured in {env_var_name}")
     return entries
+
+
+def get_used_providers() -> set[str]:
+    """Return provider names referenced in any configured LLM_* role chain."""
+    used: set[str] = set()
+    for role in DEFAULT_CHAINS:
+        for prov, _ in parse_chain(role, require_keys=False):
+            used.add(prov)
+    return used
+
+
+def get_primary_model_for_provider(provider: str) -> str:
+    """Return the first configured chain model for provider, or a fallback model."""
+    for role in DEFAULT_CHAINS:
+        for prov, model in parse_chain(role, require_keys=False):
+            if prov == provider:
+                return model
+    fallback = {
+        "gemini": "gemini-3.5-flash-lite",
+        "mistral": "mistral-small-latest",
+        "groq": "openai/gpt-oss-120b",
+        "openrouter": "openai/gpt-oss-120b:free",
+    }
+    return fallback.get(provider, "default")
+
+
+def _extract_status_code(error: Exception) -> int | None:
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        response = getattr(error, "response", None)
+        if response is not None:
+            status_code = getattr(response, "status_code", None)
+    return status_code
 
 
 def _parse_retry_after(error: Exception) -> float | None:
@@ -215,17 +391,72 @@ def _parse_retry_after(error: Exception) -> float | None:
     return None
 
 
+def _is_daily_limit_error(error: Exception) -> bool:
+    """Detect provider daily quota / per-day rate limit errors."""
+    msg = str(error).lower()
+    return any(
+        marker in msg
+        for marker in (
+            "daily limit",
+            "daily quota",
+            "requests per day",
+            "per-day",
+            "free-models-per-day",
+        )
+    )
+
+
 def _is_rate_limit_or_transient(error: Exception) -> bool:
-    """Identify HTTP 429, 5xx, or network timeouts."""
-    status_code = getattr(error, "status_code", None)
-    if status_code is None:
-        response = getattr(error, "response", None)
-        if response is not None:
-            status_code = getattr(response, "status_code", None)
+    """Identify HTTP 429, 5xx, daily-limit errors, or network timeouts."""
+    status_code = _extract_status_code(error)
     if status_code in (429, 500, 502, 503, 504):
+        return True
+    if _is_daily_limit_error(error):
         return True
     msg = str(error).lower()
     return "rate limit" in msg or "429" in msg or "timeout" in msg or "timed out" in msg
+
+
+def _is_temperature_rejection(error: Exception) -> bool:
+    """Detect HTTP 400 rejecting temperature / unsupported parameter."""
+    status_code = _extract_status_code(error)
+    msg = str(error).lower()
+    is_400 = status_code == 400 or "error code: 400" in msg or "http 400" in msg
+    if not is_400:
+        return False
+    return (
+        "temperature" in msg
+        or "unsupported parameter" in msg
+        or "unsupported_parameter" in msg
+    )
+
+
+def _invoke_with_method(
+    client: ChatOpenAI,
+    schema: type[BaseModel] | None,
+    method: str | None,
+    input_val: Any,
+) -> tuple[Any, BaseMessage | None]:
+    """Execute one invocation using either structured output method or plain invoke."""
+    if schema is None:
+        result = client.invoke(input_val)
+        raw_msg = result if isinstance(result, BaseMessage) else None
+        return result, raw_msg
+
+    if method == "default":
+        so_llm = client.with_structured_output(schema, include_raw=True)
+    else:
+        so_llm = client.with_structured_output(
+            schema, method=method, include_raw=True
+        )
+    raw_out = so_llm.invoke(input_val)
+    if isinstance(raw_out, dict) and raw_out.get("parsing_error"):
+        raise RuntimeError(
+            f"Structured output parsing failed with method {method}: {raw_out['parsing_error']}"
+        )
+    result = raw_out.get("parsed") if isinstance(raw_out, dict) else raw_out
+    raw_msg = raw_out.get("raw") if isinstance(raw_out, dict) else None
+    return result, raw_msg
 
 
 class RoleChainRunner(Runnable):
@@ -257,19 +488,17 @@ class RoleChainRunner(Runnable):
         errors: list[str] = []
         for depth, (provider, model) in enumerate(chain):
             limiter = get_limiter(provider)
-            # Prompt-size guard: check if this model can accept the prompt without exceeding TPM
-            if not limiter.can_accept(estimated_tokens):
+            reason = limiter.rejection_reason(estimated_tokens)
+            if reason is not None:
                 logger.warning(
-                    "Prompt-size guard: prompt (%d tokens) exceeds remaining TPM for provider '%s'; preferring next chain entry",
-                    estimated_tokens,
+                    "Rate/size guard skipped %s:%s (%s); preferring next chain entry",
                     provider,
+                    model,
+                    reason,
                 )
-                errors.append(
-                    f"{provider}:{model} skipped (prompt {estimated_tokens} tokens exceeds TPM limit {limiter.tpm})"
-                )
+                errors.append(f"{provider}:{model} skipped ({reason})")
                 continue
 
-            # Instantiate client
             prov_cfg = PROVIDERS[provider]
             api_key = os.getenv(prov_cfg["env_key"], "")
             client_kwargs: dict[str, Any] = {
@@ -279,12 +508,13 @@ class RoleChainRunner(Runnable):
                 "timeout": 60,
                 "max_retries": 0,
             }
-            if self.temperature is not None and can_pass_temperature(model):
-                client_kwargs["temperature"] = self.temperature
+            temp = resolve_temperature(
+                self.role, provider, model, self.temperature
+            )
+            if temp is not None:
+                client_kwargs["temperature"] = temp
 
             client = ChatOpenAI(**client_kwargs)
-
-            # Try execution with structured output fallback methods or standard call
             methods = (
                 ["default", "function_calling", "json_mode"]
                 if self.schema is not None
@@ -292,60 +522,57 @@ class RoleChainRunner(Runnable):
             )
             success = False
             result = None
-            last_err = None
+            raw_msg = None
+            last_err: Exception | None = None
 
             start_time = time.monotonic()
             for method in methods:
-                try:
-                    if self.schema is not None:
-                        if method == "default":
-                            so_llm = client.with_structured_output(
-                                self.schema, include_raw=True
-                            )
-                        else:
-                            so_llm = client.with_structured_output(
-                                self.schema, method=method, include_raw=True
-                            )
-                        raw_out = so_llm.invoke(input_val)
-                        if isinstance(raw_out, dict) and raw_out.get("parsing_error"):
-                            raise RuntimeError(
-                                f"Structured output parsing failed with method {method}: {raw_out['parsing_error']}"
-                            )
-                        result = (
-                            raw_out.get("parsed")
-                            if isinstance(raw_out, dict)
-                            else raw_out
+                retried_without_temp = False
+                while True:
+                    try:
+                        limiter.record_attempt()
+                        result, raw_msg = _invoke_with_method(
+                            client, self.schema, method, input_val
                         )
-                        raw_msg = (
-                            raw_out.get("raw")
-                            if isinstance(raw_out, dict)
-                            else None
-                        )
-                    else:
-                        result = client.invoke(input_val)
-                        raw_msg = (
-                            result if isinstance(result, BaseMessage) else None
-                        )
-
-                    success = True
-                    break
-                except Exception as ex:
-                    last_err = ex
-                    # If this was an HTTP rate limit or 5xx or timeout, don't keep retrying methods for this dead provider
-                    if _is_rate_limit_or_transient(ex):
+                        success = True
                         break
-                    logger.info(
-                        "Structured output method '%s' failed for %s:%s: %s; trying next method",
-                        method,
-                        provider,
-                        model,
-                        ex,
-                    )
+                    except Exception as ex:
+                        if (
+                            not retried_without_temp
+                            and "temperature" in client_kwargs
+                            and _is_temperature_rejection(ex)
+                        ):
+                            logger.info(
+                                "Model '%s' rejected temperature (HTTP 400); retrying once without temperature",
+                                model,
+                            )
+                            _remember_temperature_rejected(model)
+                            client_kwargs.pop("temperature", None)
+                            client = ChatOpenAI(**client_kwargs)
+                            retried_without_temp = True
+                            continue
+                        last_err = ex
+                        break
+
+                if success:
+                    break
+                assert last_err is not None
+                if _is_daily_limit_error(last_err):
+                    limiter.mark_daily_exhausted()
+                    break
+                if _is_rate_limit_or_transient(last_err):
+                    break
+                logger.info(
+                    "Structured output method '%s' failed for %s:%s: %s; trying next method",
+                    method,
+                    provider,
+                    model,
+                    last_err,
+                )
 
             latency = time.monotonic() - start_time
 
             if success:
-                # Extract token usage
                 in_tokens = estimated_tokens
                 out_tokens = 0
                 if raw_msg is not None:
@@ -357,7 +584,6 @@ class RoleChainRunner(Runnable):
                     )
                 limiter.record_usage(in_tokens + out_tokens)
 
-                # Record Telemetry to Prometheus & agent_runs
                 _record_telemetry(
                     incident_id=incident_id,
                     role=self.role,
@@ -371,8 +597,9 @@ class RoleChainRunner(Runnable):
                 )
                 return result
 
-            # Failure path for this chain entry
-            retry_after = _parse_retry_after(last_err)
+            retry_after = (
+                _parse_retry_after(last_err) if last_err is not None else None
+            )
             if retry_after is not None:
                 limiter.throttle(retry_after)
 
@@ -386,7 +613,6 @@ class RoleChainRunner(Runnable):
                 err_msg,
             )
 
-            # Record failed attempt telemetry
             _record_telemetry(
                 incident_id=incident_id,
                 role=self.role,
@@ -399,7 +625,6 @@ class RoleChainRunner(Runnable):
                 error=err_msg,
             )
 
-        # Whole chain failed: fail incident with clear reason, never hang
         raise RuntimeError(
             f"All LLM providers in chain failed for role '{self.role}': {'; '.join(errors)}"
         )
@@ -508,7 +733,7 @@ def invoke_guarded(runnable: Any, inputs: dict, incident_id: str) -> Any:
 
 
 def list_provider_models() -> dict[str, list[str]]:
-    """List model IDs returned by each configured provider (names only)."""
+    """List model IDs returned by each configured provider /models endpoint (names only)."""
     from openai import OpenAI
 
     results: dict[str, list[str]] = {}
@@ -528,25 +753,29 @@ def list_provider_models() -> dict[str, list[str]]:
     return results
 
 
-def check_chain_models() -> list[dict[str, Any]]:
+def check_chain_models(
+    available_models: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
     """Verify configured chain entries against model lists and flag missing entries."""
-    available_models = list_provider_models()
+    if available_models is None:
+        available_models = list_provider_models()
     checks: list[dict[str, Any]] = []
 
     for role in ("triage", "analyst", "fixer", "spokesperson"):
         try:
-            chain = parse_chain(role)
+            chain = parse_chain(role, require_keys=False)
         except Exception as e:
             checks.append(
-                {"role": role, "entry": "none", "status": f"error: {e}"}
+                {"role": role, "entry": "none", "status": f"FLAG: {e}"}
             )
             continue
 
         for prov, model in chain:
             models_for_prov = available_models.get(prov, [])
-            key = os.getenv(PROVIDERS[prov]["env_key"], "")
+            key_var = PROVIDERS[prov]["env_key"]
+            key = os.getenv(key_var, "").strip()
             if not key:
-                status = "skipped (no key)"
+                status = f"FLAG: missing {key_var}"
             elif not models_for_prov:
                 status = "unverified (could not list models)"
             elif model in models_for_prov:

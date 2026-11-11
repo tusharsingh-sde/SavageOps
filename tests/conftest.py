@@ -14,6 +14,22 @@ os.environ["SAVAGEOPS_MOCK"] = "1"
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 os.environ["POLL_ENABLED"] = "false"
 
+# Neutralization replaces every .env variable with "dummy"; clear "dummy" from
+# non-secret LLM chain/temperature vars so default chains apply during tests.
+for _llm_var in (
+    "LLM_TRIAGE",
+    "LLM_ANALYST",
+    "LLM_FIXER",
+    "LLM_SPOKESPERSON",
+    "LLM_TEMPERATURE_TRIAGE",
+    "LLM_TEMPERATURE_ANALYST",
+    "LLM_TEMPERATURE_FIXER",
+    "LLM_TEMPERATURE_SPOKESPERSON",
+    "LLM_TEMP_GEMINI",
+):
+    if os.environ.get(_llm_var) == "dummy":
+        os.environ.pop(_llm_var, None)
+
 
 def _is_loopback(host: Any) -> bool:
     h = str(host).lower().strip()
