@@ -33,7 +33,12 @@ async def poll_loop():
                 alerts = r.json()
                 if isinstance(alerts, list):
                     for a in alerts:
-                        if a.get("labels", {}).get("savageops", "").lower() != "true":
+                        if not isinstance(a, dict):
+                            continue
+                        labels = a.get("labels")
+                        if not isinstance(labels, dict):
+                            continue
+                        if str(labels.get("savageops", "")).lower() != "true":
                             continue
                         alert = normalize(a)
                         inc_id = await asyncio.to_thread(ingest, alert, "poller")

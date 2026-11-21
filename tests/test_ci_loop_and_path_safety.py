@@ -99,8 +99,21 @@ def test_wait_for_ci_status_failure(mock_runs):
 
 
 def test_ci_status_timeout_default_and_env(monkeypatch):
+    import importlib
+
     from savageops.agents import fixer
+
+    # Default without override
     assert fixer.CI_STATUS_TIMEOUT_SECONDS == 180
+
+    # Test env override
+    monkeypatch.setenv("CI_STATUS_TIMEOUT_SECONDS", "90")
+    try:
+        importlib.reload(fixer)
+        assert fixer.CI_STATUS_TIMEOUT_SECONDS == 90
+    finally:
+        monkeypatch.delenv("CI_STATUS_TIMEOUT_SECONDS", raising=False)
+        importlib.reload(fixer)
 
 
 def test_run_push_ci_retry_rejects_dangerous_diff(monkeypatch):
@@ -161,6 +174,12 @@ def test_build_and_verify_diff_enforces_rules():
     # Dangerous pattern
     with pytest.raises(ValueError, match="Draft adds network"):
         _build_and_verify_diff("a = 1\n", "import socket\na = 1\n")
+
+    # Overflow diff lines (> MAX_DIFF_LINES)
+    huge_old = "line\n" * 10
+    huge_new = "line\n" * 10 + "extra\n" * 350
+    with pytest.raises(ValueError, match="exceeds maximum"):
+        _build_and_verify_diff(huge_old, huge_new)
 
 
 def test_run_push_ci_retry_tracks_current_content(monkeypatch):

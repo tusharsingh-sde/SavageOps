@@ -22,6 +22,7 @@ os.environ["GRAFANA_URL"] = "http://127.0.0.1:9"
 os.environ["LOKI_URL"] = "http://127.0.0.1:9"
 os.environ["DATABASE_URL"] = ""
 os.environ["SLACK_WEBHOOK_URL"] = ""
+os.environ["CI_NO_CHECKS_GRACE_SECONDS"] = "0"
 
 # Strip real secret keys from environment during unit tests to ensure test isolation
 for _sec_var in (
@@ -108,9 +109,13 @@ def block_external_network(request):
     stack.enter_context(patch("urllib3.connectionpool.HTTPConnectionPool.urlopen", blocked_urllib3_urlopen))
 
     try:
-        import psycopg
+        import importlib
+
+        psycopg = importlib.import_module("psycopg")
+
         def blocked_psycopg_connect(*args, **kwargs):
             raise RuntimeError("Network access blocked in tests: psycopg database connection")
+
         stack.enter_context(patch.object(psycopg, "connect", blocked_psycopg_connect))
     except ImportError:
         pass
@@ -121,11 +126,24 @@ def block_external_network(request):
 
 @pytest.fixture(autouse=True)
 def isolate_in_memory_db():
-    """Ensure in-memory mock database state is completely reset and isolated."""
+    """Ensure in-memory mock database state and shared service caches are isolated."""
     import savageops.db as db_module
+    import savageops.health as health_module
+    import savageops.llm as llm_module
+    import savageops.main as main_module
 
-    db_module._memory_incidents.clear()
-    db_module._memory_agent_runs.clear()
-    yield
-    db_module._memory_incidents.clear()
-    db_module._memory_agent_runs.clear()
+    def _reset_globals():
+        db_module._memory_incidents.clear()
+        db_module._memory_agent_runs.clear()
+        db_module._canary_cache.clear()
+        health_module._checks_cache = None
+        main_module._incident_locks.clear()
+        llm_module.reset_temperature_rejections()
+        for lim in llm_module._rate_limiters.values():
+            lim.reset()
+
+    _reset_globals()
+    try:
+        yield
+    finally:
+        _reset_globals()

@@ -9,14 +9,20 @@ from savageops.config import ADMIN_USER_IDS, SUPABASE_JWT_SECRET
 
 
 def require_admin(authorization: str | None = Header(None)) -> dict:
-    """Verify Supabase JWT claims or local dev token against authorized admin emails."""
+    """Verify Supabase JWT claims against authorized admin user IDs."""
     if not authorization:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization header",
         )
 
-    token = authorization.removeprefix("Bearer ").strip()
+    parts = authorization.strip().split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Authorization header format (expected 'Bearer <token>')",
+        )
+    token = parts[1].strip()
 
     if not SUPABASE_JWT_SECRET:
         raise HTTPException(

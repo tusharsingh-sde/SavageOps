@@ -23,13 +23,13 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
-LLM_TRIAGE = os.getenv("LLM_TRIAGE", "gemini:gemini-3.5-flash-lite,gemini:gemini-3.6-flash")
+LLM_TRIAGE = os.getenv("LLM_TRIAGE", "gemini:gemini-2.5-flash-lite,gemini:gemini-2.5-flash")
 LLM_ANALYST = os.getenv(
-    "LLM_ANALYST", "gemini:gemini-3.8-flash,openrouter:openai/gpt-oss-120b:free"
+    "LLM_ANALYST", "gemini:gemini-2.5-flash,openrouter:openai/gpt-oss-120b:free"
 )
-LLM_FIXER = os.getenv("LLM_FIXER", "openrouter:qwen/qwen3-coder:free,gemini:gemini-3.8-flash")
+LLM_FIXER = os.getenv("LLM_FIXER", "openrouter:qwen/qwen3-coder:free,gemini:gemini-2.5-flash")
 LLM_SPOKESPERSON = os.getenv(
-    "LLM_SPOKESPERSON", "groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite"
+    "LLM_SPOKESPERSON", "groq:openai/gpt-oss-120b,gemini:gemini-2.5-flash-lite"
 )
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 TARGET_REPO = os.getenv("TARGET_REPO", "")

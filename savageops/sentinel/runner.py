@@ -30,8 +30,20 @@ def schedule(incident_id: str, alert: dict) -> Future:
 def _discard_future(future: Future) -> None:
     with _futures_lock:
         _futures.discard(future)
-    if future.exception():
-        logger.error("Scheduled incident pipeline failed: %s", future.exception())
+    if future.cancelled():
+        return
+    exc = future.exception()
+    if exc:
+        logger.error("Scheduled incident pipeline failed: %s", exc)
+
+
+def shutdown_runner(wait: bool = False) -> None:
+    """Cancel running incident futures and shut down the thread pool executor."""
+    with _futures_lock:
+        for f in list(_futures):
+            f.cancel()
+        _futures.clear()
+    _executor.shutdown(wait=wait, cancel_futures=True)
 
 
 def start(incident_id: str, alert: dict):
@@ -58,4 +70,3 @@ def start(incident_id: str, alert: dict):
         except Exception as e:
             logger.error("Sentinel: Pipeline execution failed for %s: %s", incident_id, e)
             log_run(incident_id, "pipeline", "error", error=str(e))
-            update_incident(incident_id, status="failed", pending={"error": str(e)})

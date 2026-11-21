@@ -1,6 +1,7 @@
 """GitHub integration tools for SavageOps."""
 
 import json
+import os
 import re
 import time
 from typing import Any
@@ -89,8 +90,11 @@ def recent_commits(
     """Retrieve recent commit metadata for a specific file path."""
     validate_safe_path(path)
     _, repo = _get_client_and_repo(repo_name)
+    commit_kwargs: dict[str, Any] = {"path": path}
+    if ref:
+        commit_kwargs["sha"] = ref
     commits = []
-    for c in repo.get_commits(path=path, sha=ref)[:n]:
+    for c in repo.get_commits(**commit_kwargs)[:n]:
         author_name = c.commit.author.name if c.commit.author else "unknown"
         author_date = str(c.commit.author.date) if c.commit.author else "unknown"
         first_line = c.commit.message.splitlines()[0] if c.commit.message else ""
@@ -106,10 +110,16 @@ def recent_commits(
     return commits
 
 
-def update_branch_file(path: str, new_content: str, commit_msg: str, branch_name: str) -> str:
+def update_branch_file(
+    path: str,
+    new_content: str,
+    commit_msg: str,
+    branch_name: str,
+    repo_name: str | None = None,
+) -> str:
     """Commit an updated file to an existing branch and return the new commit SHA."""
     validate_safe_path(path)
-    _, repo = _get_client_and_repo()
+    _, repo = _get_client_and_repo(repo_name)
     file_on_branch = repo.get_contents(path, ref=branch_name)
     res = repo.update_file(
         path=path,
@@ -182,9 +192,19 @@ def open_pr(
     }
 
 
-def get_ci_check_runs(commit_sha: str) -> list[dict[str, Any]]:
+def _output_field(output: Any, field: str) -> Any:
+    if output is None:
+        return None
+    if isinstance(output, dict):
+        return output.get(field)
+    return getattr(output, field, None)
+
+
+def get_ci_check_runs(
+    commit_sha: str, repo_name: str | None = None
+) -> list[dict[str, Any]]:
     """Fetch GitHub Actions check runs for a commit."""
-    _, repo = _get_client_and_repo()
+    _, repo = _get_client_and_repo(repo_name)
     runs = repo.get_commit(commit_sha).get_check_runs()
     results = []
     for run in runs:
@@ -193,41 +213,65 @@ def get_ci_check_runs(commit_sha: str) -> list[dict[str, Any]]:
                 "name": run.name,
                 "status": run.status,
                 "conclusion": run.conclusion,
-                "title": run.output.get("title") if run.output else None,
-                "summary": run.output.get("summary") if run.output else None,
+                "title": _output_field(run.output, "title"),
+                "summary": _output_field(run.output, "summary"),
             }
         )
     return results
 
 
 def wait_for_ci_status(
-    commit_sha: str, timeout_seconds: int = 45, poll_interval: int = 5
+    commit_sha: str,
+    timeout_seconds: int = 45,
+    poll_interval: int = 5,
+    repo_name: str | None = None,
+    no_checks_grace_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Poll GitHub Actions check runs until completion or timeout."""
-    start_time = time.time()
-    while time.time() - start_time < timeout_seconds:
+    """Poll GitHub Actions check runs until completion, grace expiry, or timeout."""
+    if no_checks_grace_seconds is None:
         try:
-            runs = get_ci_check_runs(commit_sha)
+            no_checks_grace_seconds = float(os.getenv("CI_NO_CHECKS_GRACE_SECONDS", "20"))
+        except ValueError:
+            no_checks_grace_seconds = 20.0
+    grace = max(0.0, min(no_checks_grace_seconds, float(timeout_seconds)))
+
+    start_time = time.monotonic()
+    runs: list[dict[str, Any]] = []
+    while True:
+        try:
+            if repo_name:
+                runs = get_ci_check_runs(commit_sha, repo_name=repo_name)
+            else:
+                runs = get_ci_check_runs(commit_sha)
         except Exception as e:
             return {"status": "error", "error": str(e), "runs": []}
 
+        elapsed = time.monotonic() - start_time
         if not runs:
-            # No CI checks configured or registered yet
-            return {"status": "none", "runs": []}
+            if elapsed >= grace:
+                return {"status": "none", "runs": []}
+        else:
+            all_completed = all(r["status"] == "completed" for r in runs)
+            if all_completed:
+                failures = [
+                    r for r in runs if r["conclusion"] not in ("success", "neutral", "skipped")
+                ]
+                if failures:
+                    return {
+                        "status": "failure",
+                        "runs": runs,
+                        "failure_details": "; ".join(
+                            f"{f['name']}: {f['conclusion']} ({f['summary'] or ''})"
+                            for f in failures
+                        ),
+                    }
+                return {"status": "success", "runs": runs}
 
-        all_completed = all(r["status"] == "completed" for r in runs)
-        if all_completed:
-            failures = [r for r in runs if r["conclusion"] not in ("success", "neutral", "skipped")]
-            if failures:
-                return {
-                    "status": "failure",
-                    "runs": runs,
-                    "failure_details": "; ".join(
-                        f"{f['name']}: {f['conclusion']} ({f['summary'] or ''})" for f in failures
-                    ),
-                }
-            return {"status": "success", "runs": runs}
-
-        time.sleep(poll_interval)
-
-    return {"status": "timeout", "runs": runs if "runs" in locals() else []}
+        remaining = float(timeout_seconds) - (time.monotonic() - start_time)
+        if remaining <= 0:
+            return {"status": "timeout", "runs": runs}
+        sleep_for = min(float(poll_interval), remaining)
+        if not runs:
+            sleep_for = min(sleep_for, max(0.0, grace - elapsed))
+        if sleep_for > 0:
+            time.sleep(sleep_for)

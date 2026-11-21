@@ -20,13 +20,24 @@ class TriageReport(BaseModel):
     repository: str | None = Field(default=None, description="Mapped GitHub repository for this service.")
     git_sha: str | None = Field(default=None, description="Deployed revision from the alert labels, when available.")
 
+    @model_validator(mode="after")
+    def validate_line_ranges(self):
+        if self.applicable:
+            if self.line_start < 1:
+                raise ValueError("line_start must be >= 1 when applicable is True")
+        elif self.line_start < 0:
+            raise ValueError("line_start must be >= 0")
+        if self.line_end < self.line_start:
+            raise ValueError("line_end must be >= line_start")
+        return self
+
 
 class InfoRequest(BaseModel):
     """Output from Agent 2 (Analyst) requesting additional context from Agent 1 (Triage)."""
 
     question: str = Field(description="Specific information or logs requested.")
     service: str | None = Field(default=None, description="Target service name if different.")
-    minutes: int = Field(default=15, description="Lookback window in minutes.")
+    minutes: int = Field(default=15, ge=1, le=1440, description="Lookback window in minutes.")
 
 
 class Solution(BaseModel):
@@ -82,12 +93,12 @@ class SavageSummary(BaseModel):
 class PatchHunk(BaseModel):
     """One exact source replacement; old_text must occur exactly once."""
 
-    old_text: str = Field(min_length=1)
-    new_text: str = Field(min_length=1)
+    old_text: str = Field(min_length=1, description="Original source code block to be replaced.")
+    new_text: str = Field(default="", description="Replacement text (can be empty string for code deletion).")
 
 
 class FixedFile(BaseModel):
     """Output from Agent 3 (Fixer) representing exact, uniquely matched edits."""
 
     hunks: list[PatchHunk] = Field(min_length=1, description="Exact search/replace edits to apply in order.")
-    commit_message: str = Field(description="Git commit message describing the fix.")
+    commit_message: str = Field(min_length=1, description="Git commit message describing the fix.")

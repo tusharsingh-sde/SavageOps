@@ -2,6 +2,7 @@
 
 import logging
 import os
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
@@ -13,6 +14,10 @@ from savageops.security import redact_untrusted_data
 logger = logging.getLogger(__name__)
 
 _client: Client | None = None
+_client_lock = threading.Lock()
+_canary_cache: dict[str, bool] = {}
+_canary_cache_lock = threading.Lock()
+
 # The in-memory store is available only under SAVAGEOPS_MOCK=1 outside production.
 _memory_incidents: dict[str, dict[str, Any]] = {}
 _memory_agent_runs: list[dict[str, Any]] = []
@@ -30,16 +35,21 @@ def get_db() -> Client | None:
     global _client
     if _client is not None:
         return _client
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        raise RuntimeError("Supabase URL and service key are required; set SAVAGEOPS_MOCK=1 only for local tests")
-    try:
-        _client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        return _client
-    except Exception as e:
-        if _mock_enabled():
-            logger.warning("Supabase unavailable in explicit mock mode: %s", e)
-            return None
-        raise RuntimeError(f"Supabase client initialization failed: {e}") from e
+    with _client_lock:
+        if _client is not None:
+            return _client
+        if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+            raise RuntimeError(
+                "Supabase URL and service key are required; set SAVAGEOPS_MOCK=1 only for local tests"
+            )
+        try:
+            _client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+            return _client
+        except Exception as e:
+            if _mock_enabled():
+                logger.warning("Supabase unavailable in explicit mock mode: %s", e)
+                return None
+            raise RuntimeError(f"Supabase client initialization failed: {e}") from e
 
 
 class _MemoryQueryResult:
@@ -167,6 +177,68 @@ class _DbProxy:
 db = _DbProxy()
 
 
+def get_incident(incident_id: str) -> dict[str, Any] | None:
+    """Fetch an incident by its ID, returning None if not found."""
+    if not incident_id or incident_id == "system":
+        return None
+    client = get_db()
+    if client:
+        try:
+            res = (
+                client.table("incidents")
+                .select("*")
+                .eq("id", incident_id)
+                .limit(1)
+                .execute()
+            )
+            data = res.data
+            if isinstance(data, list):
+                return data[0] if data else None
+            return data or None
+        except Exception as e:
+            if not _mock_enabled():
+                raise RuntimeError(f"Supabase incident fetch failed: {e}") from e
+            logger.warning("Using explicit mock store after incident fetch failure: %s", e)
+    if _mock_enabled():
+        return _memory_incidents.get(incident_id)
+    raise RuntimeError("In-memory database is disabled")
+
+
+def _is_canary_incident(incident_id: str) -> bool:
+    """Check whether an incident came from canary probes without fetching full rows repeatedly."""
+    if not incident_id or incident_id == "system":
+        return False
+    if _mock_enabled():
+        inc = _memory_incidents.get(incident_id)
+        return bool(inc and inc.get("source") == "canary")
+
+    with _canary_cache_lock:
+        if incident_id in _canary_cache:
+            return _canary_cache[incident_id]
+
+    client = get_db()
+    if not client:
+        return False
+    try:
+        res = (
+            client.table("incidents")
+            .select("source")
+            .eq("id", incident_id)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data if isinstance(res.data, list) else ([res.data] if res.data else [])
+        is_canary = bool(rows and rows[0].get("source") == "canary")
+    except Exception:
+        return False
+
+    with _canary_cache_lock:
+        if len(_canary_cache) >= 500:
+            _canary_cache.clear()
+        _canary_cache[incident_id] = is_canary
+    return is_canary
+
+
 def log_run(
     incident_id: str,
     agent: str,
@@ -183,8 +255,7 @@ def log_run(
     fallback_depth: int = 0,
 ) -> None:
     """Log an agent interaction to the agent_runs table or memory fallback."""
-    incident = get_incident(incident_id)
-    if not incident or incident.get("source") != "canary":
+    if not _is_canary_incident(incident_id):
         try:
             from savageops.metrics import AGENT_RUNS
 
@@ -209,6 +280,9 @@ def log_run(
     }
     client = get_db()
     if client:
+        if not incident_id or incident_id == "system":
+            logger.debug("Skipping agent_runs DB insert for synthetic incident_id=%r", incident_id)
+            return
         try:
             client.table("agent_runs").insert(payload).execute()
             return
@@ -239,19 +313,3 @@ def update_incident(incident_id: str, **fields: Any) -> None:
             logger.warning("Using explicit mock store after incident update failure: %s", e)
     if _mock_enabled() and incident_id in _memory_incidents:
         _memory_incidents[incident_id].update(fields_to_update)
-
-
-def get_incident(incident_id: str) -> dict[str, Any] | None:
-    """Fetch an incident by its UUID."""
-    client = get_db()
-    if client:
-        try:
-            res = client.table("incidents").select("*").eq("id", incident_id).single().execute()
-            return res.data
-        except Exception as e:
-            if not _mock_enabled():
-                raise RuntimeError(f"Supabase incident fetch failed: {e}") from e
-            logger.warning("Using explicit mock store after incident fetch failure: %s", e)
-    if _mock_enabled():
-        return _memory_incidents.get(incident_id)
-    raise RuntimeError("In-memory database is disabled")

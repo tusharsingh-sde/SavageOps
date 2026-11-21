@@ -1,8 +1,10 @@
 """Health check service and endpoints for SavageOps and CLI doctor command."""
 
 import os
+import threading
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -28,6 +30,11 @@ from savageops.tools.github_tools import _get_client_and_repo
 
 router = APIRouter(tags=["health"])
 
+_checks_cache: dict[str, str] | None = None
+_checks_cached_at = 0.0
+_checks_cache_ttl = 60.0
+_checks_cache_lock = threading.Lock()
+
 
 def run_checks(
     ping_llms: bool = False,
@@ -37,10 +44,12 @@ def run_checks(
 
     LLM completion pings run ONLY when ping_llms=True (CLI doctor), never from /health/deep.
     """
-    global _checks_cache, _checks_cached_at
+    global _checks_cache, _checks_cached_at, _checks_cache_ttl
     now = time.monotonic()
-    if not ping_llms and _checks_cache is not None and now - _checks_cached_at < 60:
-        return dict(_checks_cache)
+    if not ping_llms:
+        with _checks_cache_lock:
+            if _checks_cache is not None and (now - _checks_cached_at) < _checks_cache_ttl:
+                return dict(_checks_cache)
     checks: dict[str, str] = {}
     auth_header = {"Authorization": f"Bearer {GRAFANA_TOKEN}"} if GRAFANA_TOKEN else {}
 
@@ -124,7 +133,9 @@ def run_checks(
             check(f"llm_{prov}", _make_ping(), secret_to_mask=api_key)
 
     # 4. Grafana check
-    if GRAFANA_URL and "localhost" not in GRAFANA_URL and not GRAFANA_TOKEN:
+    grafana_host = (urlparse(GRAFANA_URL).hostname or "").lower() if GRAFANA_URL else ""
+    is_local_grafana = grafana_host in ("localhost", "127.0.0.1", "grafana")
+    if GRAFANA_URL and not is_local_grafana and not GRAFANA_TOKEN:
         checks["grafana"] = "fixture_mode"
     else:
 
@@ -164,13 +175,15 @@ def run_checks(
             checks["poller"] = "starting"
 
     if not ping_llms:
-        _checks_cache = checks
-        _checks_cached_at = now
+        all_ok = all(
+            v in ("ok", "fixture_mode", "starting", "skipped", "configured")
+            for v in checks.values()
+        )
+        with _checks_cache_lock:
+            _checks_cache = dict(checks)
+            _checks_cached_at = time.monotonic()
+            _checks_cache_ttl = 60.0 if all_ok else 5.0
     return dict(checks)
-
-
-_checks_cache: dict[str, str] | None = None
-_checks_cached_at = 0.0
 
 
 @router.get("/health")

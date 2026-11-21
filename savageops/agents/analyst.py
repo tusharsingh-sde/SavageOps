@@ -63,6 +63,8 @@ def run_analyst(
     }
     try:
         res: AnalystResult = invoke_guarded(prompt | get_llm(), inp, incident_id)
+        if not res.info_request and not res.analysis:
+            raise ValueError("Analyst returned neither analysis nor info_request")
         kind = "info_request" if res.info_request else "output"
         log_run(incident_id, "analyst", kind, {"path": path}, res.model_dump())
     except Exception as e:
