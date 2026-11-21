@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from datetime import UTC, datetime, timedelta
+from importlib import resources
 from pathlib import Path
 from string import Template
 
@@ -20,6 +21,17 @@ from savageops.config import (
 logger = logging.getLogger(__name__)
 
 SAFE = re.compile(r"^[\w.\-]+$")
+
+
+def _load_fixture_logs() -> str:
+    """Load sample logs fixture packaged with savageops."""
+    try:
+        return (resources.files("savageops") / "fixtures" / "sample_logs.txt").read_text(encoding="utf-8")
+    except Exception:
+        fallback = Path(__file__).resolve().parents[1] / "fixtures" / "sample_logs.txt"
+        if fallback.exists():
+            return fallback.read_text(encoding="utf-8")
+    return ""
 
 
 def _ns(dt: datetime) -> int:
@@ -57,14 +69,7 @@ def get_logs(alert: dict | str, minutes_before: int = 5) -> str:
 
     # Fixture fallback when no Grafana or Loki URL is provided
     if not GRAFANA_URL and not LOKI_URL:
-        fixture_paths = [
-            Path(__file__).resolve().parents[2] / "fixtures" / "sample_logs.txt",
-            Path(__file__).resolve().parents[1] / "fixtures" / "sample_logs.txt",
-        ]
-        for fp in fixture_paths:
-            if fp.exists():
-                return fp.read_text(encoding="utf-8")
-        return ""
+        return _load_fixture_logs()
 
     if not SAFE.match(service):
         raise ValueError(f"Invalid service label for LogQL: {service}")
@@ -116,11 +121,4 @@ def get_logs(alert: dict | str, minutes_before: int = 5) -> str:
         return "\n".join(v[1] for v in rows)
     except Exception as e:
         logger.warning("Failed to query Loki at %s: %s. Falling back to local fixture.", base, e)
-        fixture_paths = [
-            Path(__file__).resolve().parents[2] / "fixtures" / "sample_logs.txt",
-            Path(__file__).resolve().parents[1] / "fixtures" / "sample_logs.txt",
-        ]
-        for fp in fixture_paths:
-            if fp.exists():
-                return fp.read_text(encoding="utf-8")
-        return ""
+        return _load_fixture_logs()

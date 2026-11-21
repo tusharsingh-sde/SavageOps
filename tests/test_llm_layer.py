@@ -61,26 +61,26 @@ def setup_dummy_keys(monkeypatch):
 def test_parse_chain_defaults():
     triage_chain = parse_chain("triage")
     assert triage_chain == [
-        ("gemini", "gemini-3.5-flash-lite"),
-        ("gemini", "gemini-3.6-flash"),
+        ("gemini", "gemini-2.5-flash-lite"),
+        ("gemini", "gemini-2.5-flash"),
     ]
 
     analyst_chain = parse_chain("analyst")
     assert analyst_chain == [
-        ("gemini", "gemini-3.8-flash"),
+        ("gemini", "gemini-2.5-flash"),
         ("openrouter", "openai/gpt-oss-120b:free"),
     ]
 
     fixer_chain = parse_chain("fixer")
     assert fixer_chain == [
         ("openrouter", "qwen/qwen3-coder:free"),
-        ("gemini", "gemini-3.8-flash"),
+        ("gemini", "gemini-2.5-flash"),
     ]
 
     spokesperson_chain = parse_chain("spokesperson")
     assert spokesperson_chain == [
         ("groq", "openai/gpt-oss-120b"),
-        ("gemini", "gemini-3.5-flash-lite"),
+        ("gemini", "gemini-2.5-flash-lite"),
     ]
 
 
@@ -533,7 +533,7 @@ def test_unused_provider_missing_key_skipped_in_startup_doctor_and_models(monkey
             llm_module,
             "list_provider_models",
             return_value={
-                "gemini": ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"],
+                "gemini": ["gemini-2.5-flash-lite", "gemini-2.5-flash"],
                 "mistral": [],
                 "groq": ["openai/gpt-oss-120b"],
                 "openrouter": ["openai/gpt-oss-120b:free", "qwen/qwen3-coder:free"],
@@ -552,9 +552,8 @@ def test_unused_provider_missing_key_skipped_in_startup_doctor_and_models(monkey
 def test_cli_models_check():
     mock_gemini_models = MagicMock()
     mock_gemini_models.data = [
-        MagicMock(id="gemini-3.5-flash-lite"),
-        MagicMock(id="gemini-3.6-flash"),
-        MagicMock(id="gemini-3.8-flash"),
+        MagicMock(id="gemini-2.5-flash-lite"),
+        MagicMock(id="gemini-2.5-flash"),
     ]
     mock_openrouter_models = MagicMock()
     mock_openrouter_models.data = [
@@ -586,9 +585,8 @@ def test_cli_models_check():
 def test_models_normalizes_gemini_models_prefix():
     mock_gemini_models = MagicMock()
     mock_gemini_models.data = [
-        MagicMock(id="models/gemini-3.5-flash-lite"),
-        MagicMock(id="models/gemini-3.6-flash"),
-        MagicMock(id="models/gemini-3.8-flash"),
+        MagicMock(id="models/gemini-2.5-flash-lite"),
+        MagicMock(id="models/gemini-2.5-flash"),
     ]
     mock_openrouter_models = MagicMock()
     mock_openrouter_models.data = [
@@ -612,8 +610,8 @@ def test_models_normalizes_gemini_models_prefix():
 
     with patch("openai.OpenAI", side_effect=fake_openai):
         listed = llm_module.list_provider_models()
-        assert "gemini-3.8-flash" in listed["gemini"]
-        assert "models/gemini-3.8-flash" not in listed["gemini"]
+        assert "gemini-2.5-flash" in listed["gemini"]
+        assert "models/gemini-2.5-flash" not in listed["gemini"]
 
         checks = llm_module.check_chain_models()
         assert len(checks) == 8
@@ -623,9 +621,8 @@ def test_models_normalizes_gemini_models_prefix():
     direct_checks = llm_module.check_chain_models(
         available_models={
             "gemini": [
-                "models/gemini-3.5-flash-lite",
-                "models/gemini-3.6-flash",
-                "models/gemini-3.8-flash",
+                "models/gemini-2.5-flash-lite",
+                "models/gemini-2.5-flash",
             ],
             "groq": ["openai/gpt-oss-120b"],
             "openrouter": ["openai/gpt-oss-120b:free", "qwen/qwen3-coder:free"],
@@ -641,9 +638,8 @@ def test_cli_models_default_counts_only_and_all_flag(capsys, monkeypatch):
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     sample_models = {
         "gemini": [
-            "gemini-3.5-flash-lite",
-            "gemini-3.6-flash",
-            "gemini-3.8-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-flash",
             "gemini-extra-unchained",
         ],
         "mistral": [],
@@ -660,14 +656,14 @@ def test_cli_models_default_counts_only_and_all_flag(capsys, monkeypatch):
         assert exit_info.value.code == 0
 
     default_out = capsys.readouterr().out
-    assert "[GEMINI] 4 models available" in default_out
+    assert "[GEMINI] 3 models available" in default_out
     assert "[GROQ] 2 models available" in default_out
     assert "[OPENROUTER] 2 models available" in default_out
     assert "[MISTRAL] skipped" in default_out
     assert "=== Model Chain Verifications ===" in default_out
     assert "gemini-extra-unchained" not in default_out
     assert "groq-extra-unchained" not in default_out
-    assert "  - gemini-3.8-flash" not in default_out
+    assert "  - gemini-2.5-flash" not in default_out
 
     with (
         patch.object(llm_module, "list_provider_models", return_value=sample_models),
@@ -680,7 +676,7 @@ def test_cli_models_default_counts_only_and_all_flag(capsys, monkeypatch):
     all_out = capsys.readouterr().out
     assert "gemini-extra-unchained" in all_out
     assert "groq-extra-unchained" in all_out
-    assert "  - gemini-3.8-flash" in all_out
+    assert "  - gemini-2.5-flash" in all_out
     assert "=== Model Chain Verifications ===" in all_out
 
 
@@ -713,10 +709,10 @@ def test_openrouter_paid_model_guard_startup_and_override(monkeypatch):
 def test_env_examples_have_phase2c_chains():
     repo_root = Path(__file__).resolve().parent.parent
     expected_lines = [
-        "LLM_TRIAGE=gemini:gemini-3.5-flash-lite,gemini:gemini-3.6-flash",
-        "LLM_ANALYST=gemini:gemini-3.8-flash,openrouter:nvidia/nemotron-3-ultra-550b-a55b:free",
-        "LLM_FIXER=openrouter:cohere/north-mini-code:free,groq:qwen/qwen3.8-27b,gemini:gemini-3.8-flash",
-        "LLM_SPOKESPERSON=groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite",
+        "LLM_TRIAGE=gemini:gemini-2.5-flash-lite,gemini:gemini-2.5-flash",
+        "LLM_ANALYST=gemini:gemini-2.5-flash,openrouter:nvidia/nemotron-3-ultra-550b-a55b:free",
+        "LLM_FIXER=openrouter:cohere/north-mini-code:free,groq:qwen/qwen3.8-27b,gemini:gemini-2.5-flash",
+        "LLM_SPOKESPERSON=groq:openai/gpt-oss-120b,gemini:gemini-2.5-flash-lite",
     ]
     for rel_path in (".env.example", "savageops/templates/env.example"):
         text = (repo_root / rel_path).read_text(encoding="utf-8")
@@ -743,7 +739,7 @@ def test_cli_doctor_prints_provider_model_latency_and_unlisted_marker(
         client.chat.completions.create.return_value = MagicMock()
         if "google" in base_url:
             client.models.list.return_value = MagicMock(
-                data=[MagicMock(id="models/gemini-3.5-flash-lite")]
+                data=[MagicMock(id="models/gemini-2.5-flash-lite")]
             )
         elif "groq" in base_url:
             # Pinged model ("openai/gpt-oss-120b") intentionally absent from /models
@@ -785,7 +781,7 @@ def test_cli_doctor_prints_provider_model_latency_and_unlisted_marker(
     assert "secret-or-key-789" not in doc_out
 
     gem_line = next(line for line in doc_out.splitlines() if "llm_gemini" in line)
-    assert re.search(r"gemini:gemini-3\.5-flash-lite,\s*\d+ms", gem_line)
+    assert re.search(r"gemini:gemini-2\.5-flash-lite,\s*\d+ms", gem_line)
     assert "OK (model not listed)" not in gem_line
 
     groq_line = next(line for line in doc_out.splitlines() if "llm_groq" in line)
@@ -840,3 +836,75 @@ def test_cli_doctor_prints_provider_model_latency_and_unlisted_marker(
     fail_out = capsys.readouterr().out
     assert "secret-groq-key-456" not in fail_out
     assert "***" in fail_out
+
+
+def test_default_chains_use_real_baseline_gemini_ids():
+    from savageops.llm import DEFAULT_CHAINS, get_primary_model_for_provider
+
+    for role, chain in DEFAULT_CHAINS.items():
+        assert "gemini-3." not in chain, f"Found fake Gemini 3.x ID in DEFAULT_CHAINS[{role}]: {chain}"
+        assert "gemini-2.5" in chain
+    assert get_primary_model_for_provider("gemini") == "gemini-2.5-flash-lite"
+
+
+def test_invoke_with_method_guards_against_empty_parsed_and_falls_back():
+    from savageops.llm import _invoke_with_method
+
+    mock_client = MagicMock()
+    mock_so = MagicMock()
+    mock_client.with_structured_output.return_value = mock_so
+    mock_so.invoke.return_value = {"parsed": None, "raw": MagicMock(), "parsing_error": None}
+
+    with pytest.raises(RuntimeError, match="empty parsed payload"):
+        _invoke_with_method(mock_client, SampleOutput, "default", "test input")
+
+
+def test_extract_token_usage_prefers_usage_metadata():
+    from savageops.llm import _extract_token_usage
+
+    raw_msg = MagicMock()
+    raw_msg.usage_metadata = {"input_tokens": 15, "output_tokens": 45}
+    raw_msg.response_metadata = {"token_usage": {"prompt_tokens": 100, "completion_tokens": 200}}
+
+    in_tok, out_tok = _extract_token_usage(raw_msg, 10, "result")
+    assert in_tok == 15
+    assert out_tok == 45
+
+    raw_msg_legacy = MagicMock()
+    raw_msg_legacy.usage_metadata = None
+    raw_msg_legacy.response_metadata = {"token_usage": {"prompt_tokens": 80, "completion_tokens": 120}}
+    in_tok, out_tok = _extract_token_usage(raw_msg_legacy, 10, "result")
+    assert in_tok == 80
+    assert out_tok == 120
+
+
+def test_methods_loop_halts_if_daily_cap_reached_mid_loop(monkeypatch):
+    from savageops.llm import RoleChainRunner, get_limiter
+
+    limiter = get_limiter("gemini")
+    limiter.reset()
+
+    runner = RoleChainRunner("triage", schema=SampleOutput)
+
+    call_methods = []
+
+    def fake_structured_output(schema, method=None, include_raw=True):
+        call_methods.append(method)
+        m = MagicMock()
+
+        def _invoke(inp):
+            limiter.mark_daily_exhausted()
+            raise RuntimeError("Method failed")
+
+        m.invoke = _invoke
+        return m
+
+    mock_client = MagicMock()
+    mock_client.with_structured_output = fake_structured_output
+
+    with patch("savageops.llm.ChatOpenAI", return_value=mock_client):
+        with pytest.raises(RuntimeError, match="Rate/cap guard halted retry"):
+            runner.invoke("test alert input")
+
+    assert len(call_methods) == 1
+

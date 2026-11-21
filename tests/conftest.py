@@ -8,14 +8,36 @@ from unittest.mock import patch
 
 import pytest
 
-# Enforce test environment flags
+# Enforce test environment flags and disable python-dotenv from reading local .env
 os.environ["APP_ENV"] = "test"
 os.environ["SAVAGEOPS_MOCK"] = "1"
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 os.environ["POLL_ENABLED"] = "false"
 
-# Neutralization replaces every .env variable with "dummy"; clear "dummy" from
-# non-secret LLM chain/temperature vars so default chains apply during tests.
+# Safe default service configurations and secrets for test isolation
+os.environ["WEBHOOK_SECRET"] = "test-webhook-secret"
+os.environ["METRICS_TOKEN"] = "test-metrics-token"
+os.environ["SUPABASE_URL"] = "http://127.0.0.1:9"
+os.environ["GRAFANA_URL"] = "http://127.0.0.1:9"
+os.environ["LOKI_URL"] = "http://127.0.0.1:9"
+os.environ["DATABASE_URL"] = ""
+os.environ["SLACK_WEBHOOK_URL"] = ""
+
+# Strip real secret keys from environment during unit tests to ensure test isolation
+for _sec_var in (
+    "GEMINI_API_KEY",
+    "MISTRAL_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GITHUB_TOKEN",
+    "SUPABASE_SERVICE_KEY",
+    "SUPABASE_JWT_SECRET",
+    "GRAFANA_TOKEN",
+    "GRAFANA_ADMIN_PASSWORD",
+):
+    os.environ.pop(_sec_var, None)
+
+# Clear non-secret LLM chain/temperature vars so default chains apply cleanly during tests
 for _llm_var in (
     "LLM_TRIAGE",
     "LLM_ANALYST",
@@ -28,8 +50,7 @@ for _llm_var in (
     "LLM_TEMP_GEMINI",
     "LLM_ALLOW_PAID",
 ):
-    if os.environ.get(_llm_var) == "dummy":
-        os.environ.pop(_llm_var, None)
+    os.environ.pop(_llm_var, None)
 
 
 def _is_loopback(host: Any) -> bool:
