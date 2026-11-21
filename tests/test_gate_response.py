@@ -8,14 +8,15 @@ from fastapi import BackgroundTasks, HTTPException
 import savageops.main as sm
 
 
-def test_gate_validation_rejects_wrong_action():
-    sm.get_incident = MagicMock()
-    # Gate 1 incident awaiting user decision
-    sm.get_incident.return_value = {
-        "id": "inc-gate-1",
-        "status": "awaiting_user",
-        "pending": {"gate": 1},
-    }
+def test_gate_validation_rejects_wrong_action(monkeypatch):
+    mock_get = MagicMock(
+        return_value={
+            "id": "inc-gate-1",
+            "status": "awaiting_user",
+            "pending": {"gate": 1},
+        }
+    )
+    monkeypatch.setattr(sm, "get_incident", mock_get)
 
     # Gate 1 allows only approve / reject; submitting push must fail with 409
     with pytest.raises(HTTPException) as exc_info:
@@ -29,14 +30,15 @@ def test_gate_validation_rejects_wrong_action():
     assert exc_info.value.detail == "Response does not match the pending gate"
 
 
-def test_gate_validation_rejects_double_response():
-    sm.get_incident = MagicMock()
-    # Incident has already moved past Gate 1 to status 'fixing'
-    sm.get_incident.return_value = {
-        "id": "inc-gate-1-double",
-        "status": "fixing",
-        "pending": {"gate": 1},
-    }
+def test_gate_validation_rejects_double_response(monkeypatch):
+    mock_get = MagicMock(
+        return_value={
+            "id": "inc-gate-1-double",
+            "status": "fixing",
+            "pending": {"gate": 1},
+        }
+    )
+    monkeypatch.setattr(sm, "get_incident", mock_get)
 
     with pytest.raises(HTTPException) as exc_info:
         sm.respond_to_incident(
@@ -49,14 +51,16 @@ def test_gate_validation_rejects_double_response():
     assert exc_info.value.detail == "This gate is no longer awaiting a response"
 
 
-def test_per_incident_lock_is_registered():
+def test_per_incident_lock_is_registered(monkeypatch):
     incident_id = "inc-lock-test"
-    sm.get_incident = MagicMock()
-    sm.get_incident.return_value = {
-        "id": incident_id,
-        "status": "awaiting_user",
-        "pending": {"gate": 1},
-    }
+    mock_get = MagicMock(
+        return_value={
+            "id": incident_id,
+            "status": "awaiting_user",
+            "pending": {"gate": 1},
+        }
+    )
+    monkeypatch.setattr(sm, "get_incident", mock_get)
 
     # Calling respond_to_incident registers the lock for the incident_id
     try:

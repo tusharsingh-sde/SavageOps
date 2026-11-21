@@ -3,30 +3,39 @@
 import re
 from typing import Any
 
+_URI_SECRET_PATTERN = re.compile(r"://([^:/\s@]+):([^@\s/]+)@")
+
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
     re.compile(r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)(\s*[:=]\s*)['\"]?[^\s,;'\"]+"),
-    re.compile(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,})\b"),
-    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
+    re.compile(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gsk_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bxox[baprs]-[0-9a-zA-Z-]{10,80}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    re.compile(r"\b(?!REDACTED@)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
     re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
-    re.compile(r"(?<!\w)\+?\d[\d ().-]{8,}\d(?!\w)"),
+    re.compile(r"(?<!\w)(?!\d{4}-\d{2}-\d{2}(?!\d))\+?\d[\d ().-]{8,}\d(?!\w)"),
 )
 
 
 def redact_untrusted_text(text: str) -> str:
-    """Redact common credentials and email addresses before external LLM/API calls."""
-    result = text
+    """Redact common credentials, URI passwords, and email addresses before external LLM/API calls."""
+    result = _URI_SECRET_PATTERN.sub(r"://\1:[REDACTED]@", text)
     for pattern in _SECRET_PATTERNS:
         result = pattern.sub("[REDACTED]", result)
     return result
 
 
 def redact_untrusted_data(value: Any) -> Any:
-    """Recursively redact string values while preserving alert payload structure."""
+    """Recursively redact string values while preserving payload structures and collection types."""
     if isinstance(value, str):
         return redact_untrusted_text(value)
     if isinstance(value, list):
         return [redact_untrusted_data(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_untrusted_data(item) for item in value)
+    if isinstance(value, set):
+        return {redact_untrusted_data(item) for item in value}
     if isinstance(value, dict):
         return {key: redact_untrusted_data(item) for key, item in value.items()}
     return value

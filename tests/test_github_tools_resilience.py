@@ -98,6 +98,28 @@ def test_wait_for_ci_status_grace_period_polls_again_before_none():
             assert len(poll_calls) == 2
 
 
+def test_wait_for_ci_status_grace_expiry_returns_none():
+    """wait_for_ci_status returns 'none' after no-checks grace period expires on continuous empty check runs."""
+    monotonic_times = [0.0, 5.0, 15.0, 25.0]
+
+    def mock_monotonic():
+        if monotonic_times:
+            return monotonic_times.pop(0)
+        return 30.0
+
+    with patch.object(github_tools, "get_ci_check_runs", return_value=[]):
+        with patch("time.monotonic", side_effect=mock_monotonic):
+            with patch("time.sleep", return_value=None):
+                result = github_tools.wait_for_ci_status(
+                    "commit-sha-no-checks",
+                    timeout_seconds=60,
+                    poll_interval=2,
+                    no_checks_grace_seconds=10.0,
+                )
+                assert result["status"] == "none"
+                assert result["runs"] == []
+
+
 def test_run_push_forwards_custom_repository(monkeypatch):
     """run_push forwards custom triage repository name to all github_tools operations."""
     test_repo = "custom-org/custom-repo"
@@ -163,7 +185,9 @@ def test_run_push_forwards_custom_repository(monkeypatch):
 
     # Verify repo_name was forwarded to open_pr
     assert open_pr_called_with.get("repo_name") == test_repo
-    # Verify repo_name was forwarded to wait_for_ci_status
+    # Verify repo_name was forwarded to wait_for_ci_status across both initial and retry calls
+    assert len(wait_ci_called_with) >= 2
     assert wait_ci_called_with[0][1].get("repo_name") == test_repo
+    assert wait_ci_called_with[1][1].get("repo_name") == test_repo
     # Verify repo_name was forwarded to update_branch_file
     assert update_file_called_with[0][1] == test_repo

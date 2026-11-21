@@ -28,13 +28,20 @@ def get_alert(fingerprint: str) -> dict | None:
     r.raise_for_status()
     alerts = r.json()
     if isinstance(alerts, list):
-        return next((a for a in alerts if a.get("fingerprint") == fingerprint), None)
+        return next(
+            (
+                a
+                for a in alerts
+                if isinstance(a, dict) and a.get("fingerprint") == fingerprint
+            ),
+            None,
+        )
     return None
 
 
 def still_firing(fingerprint: str) -> bool:
     """Check if an alert is still firing; return True if Grafana cannot be contacted."""
-    if not GRAFANA_URL:
+    if not GRAFANA_URL or not fingerprint:
         return True
     try:
         return get_alert(fingerprint) is not None

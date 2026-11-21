@@ -101,6 +101,9 @@ async def lifespan(app: FastAPI):
             task.cancel()
         if still_pending:
             await asyncio.gather(*still_pending, return_exceptions=True)
+    from savageops.sentinel.runner import shutdown_runner
+
+    shutdown_runner(wait=False)
     if checkpointer_context:
         checkpointer_context.__exit__(None, None, None)
 

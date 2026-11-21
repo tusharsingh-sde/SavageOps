@@ -5,7 +5,6 @@ import hmac
 from fastapi import APIRouter, BackgroundTasks, Body, Header, HTTPException, status
 
 from savageops.config import WEBHOOK_SECRET
-from savageops.security import redact_untrusted_data
 from savageops.sentinel.ingest import ingest, normalize
 from savageops.sentinel.runner import schedule
 
@@ -19,23 +18,38 @@ def grafana_webhook(
     authorization: str | None = Header(None),
 ):
     """Receive alert notifications from Grafana, authenticate via Bearer token, and dispatch to Sentinel."""
-    expected = f"Bearer {WEBHOOK_SECRET}" if WEBHOOK_SECRET else ""
-    auth_clean = authorization.strip().replace('"', "") if authorization else ""
-    exp_clean = expected.strip().replace('"', "") if expected else ""
-    if not WEBHOOK_SECRET or not authorization or (
-        not hmac.compare_digest(authorization, expected) and not hmac.compare_digest(auth_clean, exp_clean)
-    ):
+    if not WEBHOOK_SECRET or not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing webhook authorization secret.",
+        )
+    parts = authorization.strip().split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization header format.",
+        )
+    token = parts[1].strip().strip('"')
+    if not hmac.compare_digest(token, WEBHOOK_SECRET):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing webhook authorization secret.",
         )
 
+    alerts = payload.get("alerts")
+    if alerts is None or not isinstance(alerts, list):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="'alerts' must be a list",
+        )
+
     created = []
-    for a in payload.get("alerts", []):
+    for a in alerts:
+        if not isinstance(a, dict):
+            continue
         if a.get("status") != "firing":
             continue
         alert = normalize(a)
-        alert = redact_untrusted_data(alert)
         inc_id = ingest(alert, "webhook")
         if inc_id:
             created.append(inc_id)
