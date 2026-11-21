@@ -42,17 +42,54 @@ def get_llm():
     return _get_llm_chain("triage", schema=TriageReport)
 
 
+_IGNORED_PATH_MARKERS = (
+    "/site-packages/",
+    "/dist-packages/",
+    "/.venv/",
+    "/venv/",
+    "/lib/python",
+    "/usr/lib/",
+    "/usr/local/lib/",
+    "/appdata/local/programs/python",
+)
+_CONTAINER_ROOTS = ("/app/", "/workspace/", "/code/", "/srv/", "/var/task/")
+_SOURCE_ROOT_DIRS = {"app", "src", "services", "api", "backend", "pkg", "savageops"}
+
+
+def _is_external_frame(normalized: str) -> bool:
+    lower = normalized.lower()
+    if normalized.startswith("<"):
+        return True
+    if lower.startswith(("/usr/", "/lib/", "c:/python")):
+        return True
+    return any(marker in lower for marker in _IGNORED_PATH_MARKERS)
+
+
+def _to_repo_relative(normalized: str) -> str:
+    cleaned = re.sub(r"^\./+", "", normalized).strip()
+    is_abs = cleaned.startswith("/") or bool(re.match(r"^[A-Za-z]:/", cleaned))
+    if not is_abs:
+        return cleaned
+    lower = cleaned.lower()
+    for prefix in _CONTAINER_ROOTS:
+        if lower.startswith(prefix):
+            return cleaned[len(prefix):]
+    parts = [p for p in cleaned.split("/") if p]
+    for idx, part in enumerate(parts[:-1]):
+        if part.lower() in _SOURCE_ROOT_DIRS:
+            return "/".join(parts[idx:])
+    return parts[-1] if parts else cleaned
+
+
 def extract_path(logs: str) -> str | None:
     """Extract the innermost repository source file path from traceback lines."""
     matches = re.findall(r'File\s+["\']([^"\']+\.py)["\']', logs)
-    if matches:
-        for path in reversed(matches):
-            normalized = path.replace("\\", "/")
-            if "site-packages" not in normalized and not normalized.startswith(
-                ("/usr", "/lib", "C:/Python")
-            ):
-                return normalized.split("/")[-1]
-        return matches[-1].replace("\\", "/").split("/")[-1]
+    if not matches:
+        return None
+    for path in reversed(matches):
+        normalized = path.replace("\\", "/")
+        if not _is_external_frame(normalized):
+            return _to_repo_relative(normalized)
     return None
 
 
@@ -83,9 +120,10 @@ def run_triage(incident_id: str, alert: dict, info_request: dict | None = None) 
     code_text = get_file(path, ref=git_sha, repo_name=repository)
     code = numbered(code_text)
 
+    redacted_logs = redact_untrusted_text(traceback_context(logs))
     inp = {
         "alert": redact_untrusted_text(str(alert)),
-        "logs": redact_untrusted_text(traceback_context(logs)),
+        "logs": redacted_logs,
         "path": path,
         "code": redact_untrusted_text(code),
         "question": (info_request or {}).get("question", "none"),
@@ -95,7 +133,10 @@ def run_triage(incident_id: str, alert: dict, info_request: dict | None = None) 
         llm = get_llm()
         report: TriageReport = invoke_guarded(prompt | llm, inp, incident_id)
         total_lines = len(code_text.splitlines())
-        evidence_valid = bool(report.evidence) and all(item.strip() and item.strip() in logs for item in report.evidence)
+        evidence_valid = bool(report.evidence) and all(
+            item.strip() and (item.strip() in logs or item.strip() in redacted_logs)
+            for item in report.evidence
+        )
         location_valid = (
             report.file_path.replace("\\", "/").endswith(path.replace("\\", "/"))
             and 1 <= report.line_start <= report.line_end <= total_lines

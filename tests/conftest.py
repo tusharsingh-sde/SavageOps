@@ -22,6 +22,7 @@ os.environ["GRAFANA_URL"] = "http://127.0.0.1:9"
 os.environ["LOKI_URL"] = "http://127.0.0.1:9"
 os.environ["DATABASE_URL"] = ""
 os.environ["SLACK_WEBHOOK_URL"] = ""
+os.environ["CI_NO_CHECKS_GRACE_SECONDS"] = "0"
 
 # Strip real secret keys from environment during unit tests to ensure test isolation
 for _sec_var in (

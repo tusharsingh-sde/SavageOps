@@ -23,6 +23,22 @@ from savageops.sentinel.webhook import router as sentinel_webhook_router
 from savageops.watchdog import watchdog_loop
 
 _incident_locks: dict[str, Lock] = {}
+_incident_locks_guard = Lock()
+
+
+def _get_incident_lock(incident_id: str) -> Lock:
+    with _incident_locks_guard:
+        if len(_incident_locks) > 1000:
+            stale = [k for k, v in _incident_locks.items() if not v.locked()]
+            for k in stale[:500]:
+                _incident_locks.pop(k, None)
+        lock = _incident_locks.get(incident_id)
+        if lock is None:
+            lock = Lock()
+            _incident_locks[incident_id] = lock
+        return lock
+
+
 _background_tasks: set[asyncio.Task] = set()
 
 
@@ -61,7 +77,7 @@ async def lifespan(app: FastAPI):
         rows = (
             db.table("incidents")
             .select("id,alert")
-            .in_("status", ["received", "triaged"])
+            .eq("status", "received")
             .execute()
             .data
             or []
@@ -78,6 +94,13 @@ async def lifespan(app: FastAPI):
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    if _background_tasks:
+        pending_bg = list(_background_tasks)
+        _, still_pending = await asyncio.wait(pending_bg, timeout=10.0)
+        for task in still_pending:
+            task.cancel()
+        if still_pending:
+            await asyncio.gather(*still_pending, return_exceptions=True)
     if checkpointer_context:
         checkpointer_context.__exit__(None, None, None)
 
@@ -115,7 +138,7 @@ def respond_to_incident(
     admin: dict = Depends(require_admin),
 ):
     """Validate the pending human gate, then resume its graph in a background task."""
-    lock = _incident_locks.setdefault(incident_id, Lock())
+    lock = _get_incident_lock(incident_id)
     with lock:
         inc = get_incident(incident_id)
         if not inc:

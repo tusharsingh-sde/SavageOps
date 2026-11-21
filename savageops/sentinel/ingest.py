@@ -1,5 +1,7 @@
 """Sentinel Ingestion Engine: deduplication, debouncing, and normalization."""
 
+import hashlib
+import json
 import logging
 import time
 from datetime import UTC, datetime
@@ -14,6 +16,18 @@ OPEN = [
     "received", "triaged", "awaiting_user", "awaiting_push", "fixing", "pushing",
     "needs_human", "failed", "pr_open",
 ]
+
+
+def _fallback_fingerprint(alert: dict) -> str:
+    """Derive a deterministic fingerprint when the alert source omits one."""
+    payload = {
+        "labels": alert.get("labels") or {},
+        "annotations": alert.get("annotations") or {},
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"derived-{digest}"
 
 
 def normalize(a: dict) -> dict:
@@ -53,7 +67,7 @@ def ingest(alert: dict, source: str) -> str | None:
 
     Returns incident_id if a new incident was created, else None.
     """
-    fp = alert.get("fingerprint") or "unknown"
+    fp = alert.get("fingerprint") or _fallback_fingerprint(alert)
     starts_at = alert.get("startsAt") or "unknown"
     key = f"{fp}:{starts_at}"
 
@@ -193,7 +207,7 @@ def monitoring_down():
         "source": "poller",
         "alert": {"labels": {"alertname": "GrafanaUnreachable"}},
         "status": "needs_human",
-        "pending": {"error": "Grafana lagataar 3 baar unreachable raha"},
+        "pending": {"error": "Grafana has been unreachable for 3 consecutive checks."},
         "last_seen_at": now_iso,
         "created_at": now_iso,
         "updated_at": now_iso,
@@ -209,7 +223,7 @@ def monitoring_down():
                 "alert": {"labels": {"alertname": "GrafanaUnreachable"}},
                 "status": "needs_human",
                 "pending": {
-                    "error": "Grafana lagataar 3 baar unreachable raha",
+                    "error": "Grafana has been unreachable for 3 consecutive checks.",
                     "group_key": "monitoring-down",
                 },
                 "created_at": now_iso,
