@@ -56,10 +56,10 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 }
 
 DEFAULT_CHAINS: dict[str, str] = {
-    "triage": "gemini:gemini-3.5-flash-lite,gemini:gemini-3.6-flash",
-    "analyst": "gemini:gemini-3.8-flash,openrouter:openai/gpt-oss-120b:free",
-    "fixer": "openrouter:qwen/qwen3-coder:free,gemini:gemini-3.8-flash",
-    "spokesperson": "groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite",
+    "triage": "gemini:gemini-2.5-flash-lite,gemini:gemini-2.5-flash",
+    "analyst": "gemini:gemini-2.5-flash,openrouter:openai/gpt-oss-120b:free",
+    "fixer": "openrouter:qwen/qwen3-coder:free,gemini:gemini-2.5-flash",
+    "spokesperson": "groq:openai/gpt-oss-120b,gemini:gemini-2.5-flash-lite",
 }
 
 DEFAULT_TEMPERATURES: dict[str, float] = {
@@ -273,34 +273,43 @@ _rate_limiters: dict[str, ProviderRateLimiter] = {
 }
 
 
+_rate_limiters_lock = threading.Lock()
+
+
 def get_limiter(provider: str) -> ProviderRateLimiter:
     tpm_env = os.getenv(f"{provider.upper()}_TPM")
     rpm_env = os.getenv(f"{provider.upper()}_RPM")
     rpd_env = os.getenv(f"{provider.upper()}_RPD")
-    limiter = _rate_limiters.get(provider)
-    if limiter is None:
-        tpm = (
-            int(tpm_env)
-            if tpm_env
-            else PROVIDERS.get(provider, {}).get("default_tpm", 500_000)
-        )
-        rpm = (
-            int(rpm_env)
-            if rpm_env
-            else PROVIDERS.get(provider, {}).get("default_rpm", 60)
-        )
-        rpd = _default_rpd_for(provider)
-        limiter = ProviderRateLimiter(provider, tpm, rpm, rpd)
-        _rate_limiters[provider] = limiter
-    else:
+    default_rpd = PROVIDERS.get(provider, {}).get("default_rpd")
+
+    with _rate_limiters_lock:
+        limiter = _rate_limiters.get(provider)
+        if limiter is None:
+            tpm = (
+                int(tpm_env)
+                if tpm_env
+                else PROVIDERS.get(provider, {}).get("default_tpm", 500_000)
+            )
+            rpm = (
+                int(rpm_env)
+                if rpm_env
+                else PROVIDERS.get(provider, {}).get("default_rpm", 60)
+            )
+            rpd = _default_rpd_for(provider)
+            limiter = ProviderRateLimiter(provider, tpm, rpm, rpd)
+            _rate_limiters[provider] = limiter
+            return limiter
+
+    with limiter.lock:
         if tpm_env:
             limiter.tpm = int(tpm_env)
         if rpm_env:
             limiter.rpm = int(rpm_env)
-        if rpd_env is not None and rpd_env.strip():
-            limiter.rpd = int(rpd_env)
-        else:
-            limiter.rpd = PROVIDERS.get(provider, {}).get("default_rpd")
+        limiter.rpd = (
+            int(rpd_env)
+            if (rpd_env is not None and rpd_env.strip())
+            else default_rpd
+        )
     return limiter
 
 
@@ -392,7 +401,7 @@ def get_primary_model_for_provider(provider: str) -> str:
             if prov == provider:
                 return model
     fallback = {
-        "gemini": "gemini-3.5-flash-lite",
+        "gemini": "gemini-2.5-flash-lite",
         "mistral": "mistral-small-latest",
         "groq": "openai/gpt-oss-120b",
         "openrouter": "openai/gpt-oss-120b:free",
@@ -487,7 +496,32 @@ def _invoke_with_method(
         )
     result = raw_out.get("parsed") if isinstance(raw_out, dict) else raw_out
     raw_msg = raw_out.get("raw") if isinstance(raw_out, dict) else None
+    if result is None:
+        raise RuntimeError(
+            f"Structured output returned empty parsed payload with method {method}"
+        )
     return result, raw_msg
+
+
+def _extract_token_usage(
+    raw_msg: BaseMessage | None, estimated_in: int, result: Any
+) -> tuple[int, int]:
+    if raw_msg is None:
+        return estimated_in, 0
+    usage_meta = getattr(raw_msg, "usage_metadata", None) or {}
+    if isinstance(usage_meta, dict) and (
+        "input_tokens" in usage_meta or "output_tokens" in usage_meta
+    ):
+        return (
+            int(usage_meta.get("input_tokens", estimated_in)),
+            int(usage_meta.get("output_tokens", estimate_tokens(result))),
+        )
+    metadata = getattr(raw_msg, "response_metadata", {}) or {}
+    token_usage = metadata.get("token_usage", {}) or {}
+    return (
+        int(token_usage.get("prompt_tokens", estimated_in)),
+        int(token_usage.get("completion_tokens", estimate_tokens(result))),
+    )
 
 
 class RoleChainRunner(Runnable):
@@ -558,6 +592,12 @@ class RoleChainRunner(Runnable):
 
             start_time = time.monotonic()
             for method in methods:
+                retry_reason = limiter.rejection_reason(estimated_tokens)
+                if retry_reason is not None:
+                    last_err = RuntimeError(
+                        f"Rate/cap guard halted retry: {retry_reason}"
+                    )
+                    break
                 retried_without_temp = False
                 while True:
                     try:
@@ -604,15 +644,9 @@ class RoleChainRunner(Runnable):
             latency = time.monotonic() - start_time
 
             if success:
-                in_tokens = estimated_tokens
-                out_tokens = 0
-                if raw_msg is not None:
-                    metadata = getattr(raw_msg, "response_metadata", {}) or {}
-                    token_usage = metadata.get("token_usage", {}) or {}
-                    in_tokens = token_usage.get("prompt_tokens", in_tokens)
-                    out_tokens = token_usage.get(
-                        "completion_tokens", estimate_tokens(result)
-                    )
+                in_tokens, out_tokens = _extract_token_usage(
+                    raw_msg, estimated_tokens, result
+                )
                 limiter.record_usage(in_tokens + out_tokens)
 
                 _record_telemetry(
