@@ -18,8 +18,19 @@ def _positive_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
+LLM_TRIAGE = os.getenv("LLM_TRIAGE", "gemini:gemini-3.5-flash-lite,gemini:gemini-3.6-flash")
+LLM_ANALYST = os.getenv(
+    "LLM_ANALYST", "gemini:gemini-3.8-flash,openrouter:openai/gpt-oss-120b:free"
+)
+LLM_FIXER = os.getenv("LLM_FIXER", "openrouter:qwen/qwen3-coder:free,gemini:gemini-3.8-flash")
+LLM_SPOKESPERSON = os.getenv(
+    "LLM_SPOKESPERSON", "groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite"
+)
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 TARGET_REPO = os.getenv("TARGET_REPO", "")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -57,12 +68,19 @@ GROUP_COOLDOWN_SECONDS = _positive_int("GROUP_COOLDOWN_SECONDS", 60)
 
 
 def validate_startup_config() -> None:
-    """Validate required production secrets only when the API server starts."""
+    """Validate LLM chains/paid guard on startup, and required secrets in production."""
+    from savageops.llm import DEFAULT_CHAINS, PROVIDERS, parse_chain
+
+    used_providers: list[str] = []
+    for role in DEFAULT_CHAINS:
+        for prov, _ in parse_chain(role, require_keys=False, enforce_paid_guard=True):
+            if prov not in used_providers:
+                used_providers.append(prov)
+
     if APP_ENV != "production":
         return
+
     required = {
-        "OPENAI_API_KEY": OPENAI_API_KEY,
-        "OPENAI_MODEL": OPENAI_MODEL,
         "GITHUB_TOKEN": GITHUB_TOKEN,
         "TARGET_REPO": TARGET_REPO,
         "SUPABASE_URL": SUPABASE_URL,
@@ -75,5 +93,12 @@ def validate_startup_config() -> None:
     missing = [name for name, value in required.items() if not value]
     if not ADMIN_USER_IDS:
         missing.append("ADMIN_USER_IDS")
+
+    # Validate provider keys ONLY for providers referenced in configured LLM_* chains
+    for prov in used_providers:
+        key_name = PROVIDERS[prov]["env_key"]
+        if not os.getenv(key_name, "").strip() and key_name not in missing:
+            missing.append(key_name)
+
     if missing:
         raise RuntimeError("Missing required production configuration: " + ", ".join(missing))

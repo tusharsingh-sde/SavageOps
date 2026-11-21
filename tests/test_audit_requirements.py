@@ -137,6 +137,7 @@ def test_run_push_records_no_ci_as_manual_review_not_pass(monkeypatch):
 
 def test_run_push_ci_failure_retries_at_most_once(monkeypatch):
     monkeypatch.setattr(fixer, "get_incident", lambda _id: {"triage": {}})
+    monkeypatch.setattr(fixer, "log_run", lambda *_a, **_kw: None)
     monkeypatch.setattr(
         fixer, "open_pr",
         lambda **_kwargs: {"pr_url": "https://example.invalid/pr/1", "branch": "b", "head_sha": "h"},

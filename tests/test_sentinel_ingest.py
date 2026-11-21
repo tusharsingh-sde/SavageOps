@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+import pytest
+
 from savageops.sentinel.ingest import ingest, monitoring_down, normalize
 
 
@@ -40,3 +42,54 @@ def test_ingest_and_deduplication():
 
 def test_monitoring_down():
     monitoring_down()  # Should create without unhandled error
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_drops_alerts_without_savageops_label(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from savageops.sentinel import poller
+
+    alerts_payload = [
+        {"status": "firing", "labels": {"alertname": "IgnoreFalse", "service": "s1", "savageops": "false"}, "fingerprint": "fp1"},
+        {"status": "firing", "labels": {"alertname": "IgnoreMissing", "service": "s2"}, "fingerprint": "fp2"},
+        {"status": "firing", "labels": {"alertname": "ProcessTrue", "service": "s3", "savageops": "true"}, "fingerprint": "fp3"},
+    ]
+
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = alerts_payload
+    mock_resp.raise_for_status = MagicMock()
+
+    call_count = 0
+
+    async def mock_get(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            raise asyncio.CancelledError()
+        return mock_resp
+
+    mock_client = AsyncMock()
+    mock_client.get = mock_get
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+
+    monkeypatch.setattr(poller, "POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: mock_client)
+
+    ingested_alerts = []
+    monkeypatch.setattr(poller, "ingest", lambda alert, source: ingested_alerts.append((alert, source)) or "inc-poller-1")
+    monkeypatch.setattr(poller, "schedule", lambda inc_id, alert: None)
+
+    try:
+        await poller.poll_loop()
+    except asyncio.CancelledError:
+        pass
+
+    assert len(ingested_alerts) == 1
+    ingested_alert, source = ingested_alerts[0]
+    assert source == "poller"
+    assert ingested_alert["labels"]["alertname"] == "ProcessTrue"
+    assert ingested_alert["labels"]["savageops"] == "true"
+

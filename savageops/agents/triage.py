@@ -4,9 +4,9 @@ import re
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from savageops.config import OPENAI_MODEL
 from savageops.db import log_run, update_incident
-from savageops.llm import create_chat_model, invoke_guarded
+from savageops.llm import get_llm as _get_llm_chain
+from savageops.llm import invoke_guarded
 from savageops.models import TriageReport
 from savageops.security import redact_untrusted_text, traceback_context
 from savageops.tools.github_tools import get_file, numbered, resolve_service_path
@@ -39,7 +39,7 @@ prompt = ChatPromptTemplate.from_messages(
 
 
 def get_llm():
-    return create_chat_model(OPENAI_MODEL).with_structured_output(TriageReport)
+    return _get_llm_chain("triage", schema=TriageReport)
 
 
 def extract_path(logs: str) -> str | None:

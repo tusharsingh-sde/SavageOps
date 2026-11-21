@@ -15,6 +15,20 @@ def test_cli_help():
     assert "doctor" in res.stdout
     assert "simulate" in res.stdout
     assert "init" in res.stdout
+    assert "models" in res.stdout
+
+
+def test_cli_models_and_doctor_subcommand_help():
+    for subcmd in ("models", "doctor"):
+        res = subprocess.run(
+            [sys.executable, "-m", "savageops.cli", subcmd, "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0
+        assert subcmd in res.stdout
+        if subcmd == "models":
+            assert "--all" in res.stdout
 
 
 def test_cli_init(tmp_path):

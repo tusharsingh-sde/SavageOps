@@ -15,6 +15,18 @@ ESCALATIONS = Counter("incident_escalations_total", "Total incidents escalated t
 OPEN_INC = Gauge(
     "incidents_open", "Count of currently open incidents by lifecycle status", ["status"]
 )
+LLM_CALLS = Counter(
+    "llm_calls_total", "Total LLM calls made", ["provider", "model", "role", "status"]
+)
+LLM_TOKENS = Counter(
+    "llm_tokens_total", "Total tokens consumed by LLM calls", ["provider", "model", "role", "type"]
+)
+LLM_LATENCY = Histogram(
+    "llm_latency_seconds", "Latency of LLM calls in seconds", ["provider", "model", "role"]
+)
+LLM_FALLBACK_DEPTH = Histogram(
+    "llm_fallback_depth", "Fallback depth reached in model chain", ["role"]
+)
 
 
 def timed(agent: str):
