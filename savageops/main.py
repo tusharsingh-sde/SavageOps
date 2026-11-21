@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 from threading import Lock
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Response, status
-from langgraph.types import Command
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from savageops.auth import require_admin
@@ -141,11 +140,10 @@ def respond_to_incident(
 
 
 def _resume_incident(incident_id: str, body: dict) -> None:
-    from savageops.graph import graph
+    from savageops.graph import resume_pipeline
 
     try:
-        graph.invoke(Command(resume=body), {"configurable": {"thread_id": incident_id}})
-    except Exception as e:
-        from savageops.db import update_incident
-
-        update_incident(incident_id, status="failed", pending={"error": str(e)[:500]})
+        resume_pipeline(incident_id, body)
+    except Exception:
+        # Crash-to-escalation boundary in resume_pipeline already marked incident needs_human and logged error
+        pass

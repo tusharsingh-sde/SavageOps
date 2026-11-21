@@ -1,10 +1,11 @@
 """LangGraph orchestration graph for SavageOps multi-agent lifecycle."""
 
-from typing import TypedDict
+import logging
+from typing import Any, TypedDict
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 
 from savageops.agents.analyst import run_analyst
 from savageops.agents.fixer import run_fix_draft, run_push
@@ -14,6 +15,8 @@ from savageops.config import MAX_HOPS
 from savageops.db import update_incident
 from savageops.metrics import ESCALATIONS, timed
 from savageops.security import redact_untrusted_data
+
+logger = logging.getLogger(__name__)
 
 
 class State(TypedDict, total=False):
@@ -135,14 +138,36 @@ def push_node(s: State) -> dict:
     return {"pr_url": url}
 
 
+def _escalation_reason(s: State) -> str:
+    fix_draft = s.get("fix_draft") or {}
+    if fix_draft and not fix_draft.get("ok"):
+        return fix_draft.get("reason") or "Fix draft failed validation."
+    if over_budget(s):
+        return f"Incident exceeded hop budget ({MAX_HOPS})."
+    triage = s.get("triage") or {}
+    if triage and triage.get("confidence", 1.0) < 0.6:
+        return f"Triage confidence too low ({triage.get('confidence')})."
+    if s.get("info_requests", 0) > 2:
+        return "Analyst exceeded maximum info requests."
+    if s.get("rejections", 0) >= 3:
+        return "Maximum Gate 1 rejections reached."
+    if s.get("revisions", 0) >= 2:
+        return "Maximum Gate 2 revisions reached."
+    return "Escalated for manual human review."
+
+
 def escalate_node(s: State) -> dict:
     ESCALATIONS.inc()
-    update_incident(s["incident_id"], status="needs_human")
+    update_incident(
+        s["incident_id"],
+        status="needs_human",
+        pending={"error": _escalation_reason(s)},
+    )
     return {}
 
 
 def done_rejected(s: State) -> dict:
-    update_incident(s["incident_id"], status="rejected")
+    update_incident(s["incident_id"], status="rejected", pending=None)
     return {}
 
 
@@ -186,7 +211,7 @@ def route_after_gate2(s: State) -> str:
     if action == "push":
         return "push"
     if action == "revise":
-        return "revise" if s.get("revisions", 0) < 2 else "escalate"
+        return "revise" if s.get("revisions", 0) < 2 and not over_budget(s) else "escalate"
     return "done_rejected"
 
 
@@ -225,16 +250,48 @@ builder.add_edge("done_rejected", END)
 builder.add_edge("not_applicable", END)
 
 checkpointer = MemorySaver()
-graph = builder.compile(checkpointer=checkpointer)
+_graph = builder.compile(checkpointer=checkpointer)
+graph = _graph  # backwards-compatible alias; internal callers must use get_graph()
+
+
+def get_graph():
+    """Return the active compiled LangGraph instance (MemorySaver or Postgres)."""
+    return _graph
 
 
 def configure_postgres_checkpointer(checkpointer_obj) -> None:
     """Replace the local memory checkpointer with a durable PostgreSQL checkpointer."""
-    global graph
-    graph = builder.compile(checkpointer=checkpointer_obj)
+    global _graph, graph
+    _graph = builder.compile(checkpointer=checkpointer_obj)
+    graph = _graph
+
+
+def _invoke_with_boundary(incident_id: str, payload: Any) -> Any:
+    cfg = {"configurable": {"thread_id": incident_id}}
+    try:
+        return get_graph().invoke(payload, cfg)
+    except Exception as exc:
+        logger.exception("Unhandled pipeline failure for incident %s", incident_id)
+        ESCALATIONS.inc()
+        try:
+            update_incident(
+                incident_id,
+                status="needs_human",
+                pending={"error": f"Pipeline crashed: {exc}"},
+            )
+        except Exception:
+            logger.exception("Failed to mark incident %s as needs_human", incident_id)
+        raise
 
 
 def run_pipeline(incident_id: str, alert: dict):
-    """Invoke the LangGraph pipeline for an incident in a separate thread context."""
-    cfg = {"configurable": {"thread_id": incident_id}}
-    graph.invoke({"incident_id": incident_id, "alert": redact_untrusted_data(alert)}, cfg)
+    """Invoke the LangGraph pipeline for an incident with crash-to-escalation boundary."""
+    return _invoke_with_boundary(
+        incident_id,
+        {"incident_id": incident_id, "alert": redact_untrusted_data(alert)},
+    )
+
+
+def resume_pipeline(incident_id: str, decision: dict):
+    """Resume a paused gate interrupt with the same crash-to-escalation boundary."""
+    return _invoke_with_boundary(incident_id, Command(resume=decision))
