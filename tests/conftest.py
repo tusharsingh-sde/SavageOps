@@ -109,9 +109,13 @@ def block_external_network(request):
     stack.enter_context(patch("urllib3.connectionpool.HTTPConnectionPool.urlopen", blocked_urllib3_urlopen))
 
     try:
-        import psycopg
+        import importlib
+
+        psycopg = importlib.import_module("psycopg")
+
         def blocked_psycopg_connect(*args, **kwargs):
             raise RuntimeError("Network access blocked in tests: psycopg database connection")
+
         stack.enter_context(patch.object(psycopg, "connect", blocked_psycopg_connect))
     except ImportError:
         pass
