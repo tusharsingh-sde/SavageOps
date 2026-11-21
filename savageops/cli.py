@@ -29,6 +29,12 @@ def main():
     run_parser = subparsers.add_parser("run", help="Start the SavageOps API and Sentinel server")
     run_parser.add_argument("--host", default="127.0.0.1", help="Binding host address")
     run_parser.add_argument("--port", type=int, default=8000, help="Binding port number")
+    run_parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of worker processes (default: 1 for in-memory rate limits)",
+    )
 
     # 2. doctor command
     subparsers.add_parser("doctor", help="Verify dependencies and environment configuration")
@@ -56,7 +62,7 @@ def main():
     args = parser.parse_args()
 
     if args.cmd == "run":
-        uvicorn.run("savageops.main:app", host=args.host, port=args.port)
+        uvicorn.run("savageops.main:app", host=args.host, port=args.port, workers=args.workers)
 
     elif args.cmd == "doctor":
         from savageops.health import run_checks

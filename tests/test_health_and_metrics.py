@@ -76,20 +76,33 @@ def test_watchdog_alert_dispatcher():
             mock_post.assert_called_once()
 
 
-def test_sentinel_webhook_endpoint():
+def test_sentinel_webhook_endpoint(monkeypatch):
+    import savageops.config as cfg
+    import savageops.sentinel.webhook as wh
+
+    test_secret = "test-webhook-secret"
+    monkeypatch.setattr(cfg, "WEBHOOK_SECRET", test_secret)
+    monkeypatch.setattr(wh, "WEBHOOK_SECRET", test_secret)
+
     client = TestClient(app)
 
     # 1. Reject without auth header
     r = client.post("/api/webhook/grafana", json={"alerts": []})
     assert r.status_code == 401
 
-    # 2. Accept with valid secret
-    from savageops.config import WEBHOOK_SECRET
+    # 2. Reject with invalid secret
+    r_bad = client.post(
+        "/api/webhook/grafana",
+        json={"alerts": []},
+        headers={"Authorization": "Bearer wrong-secret"},
+    )
+    assert r_bad.status_code == 401
 
+    # 3. Accept with valid secret
     r_ok = client.post(
         "/api/webhook/grafana",
         json={"alerts": []},
-        headers={"Authorization": f"Bearer {WEBHOOK_SECRET}"},
+        headers={"Authorization": f"Bearer {test_secret}"},
     )
     assert r_ok.status_code == 202
     assert "created" in r_ok.json()
