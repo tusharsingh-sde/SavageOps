@@ -31,7 +31,12 @@ from savageops.tools.github_tools import (
 
 ALLOWED_EXT = (".py",)
 MAX_CI_FIX_RETRIES = 1
-CI_STATUS_TIMEOUT_SECONDS = 45
+CI_STATUS_TIMEOUT_SECONDS = int(os.getenv("CI_STATUS_TIMEOUT_SECONDS", "180"))
+
+DANGEROUS_DIFF_PATTERN = re.compile(
+    r"(?im)^\+.*(?:import\s+(?:socket|subprocess|urllib)|from\s+(?:socket|subprocess|urllib)|"
+    r"(?:subprocess|socket|urllib|requests|httpx)\.|os\.(?:environ|getenv))"
+)
 
 SYSTEM = """You fix bugs by returning exact search/replace hunks, never a complete file.
 Each old_text must be a verbatim, unique substring of the file. Include enough context to match once.
@@ -110,6 +115,28 @@ def validate(path: str, content: str, baseline_content: str | None = None) -> No
         raise ValueError(f"New ruff errors introduced: {introduced.most_common(3)}")
 
 
+def _build_and_verify_diff(original: str, updated: str) -> str:
+    """Build unified diff and enforce non-empty, max-line, and security checks."""
+    diff = "\n".join(
+        difflib.unified_diff(
+            original.splitlines(),
+            updated.splitlines(),
+            "before",
+            "after",
+            lineterm="",
+        )
+    )
+    if not diff:
+        raise ValueError("Generated patch made no changes; manual review required.")
+    if len(diff.splitlines()) > MAX_DIFF_LINES:
+        raise ValueError("Diff exceeds maximum allowed lines; manual review required.")
+    if DANGEROUS_DIFF_PATTERN.search(diff):
+        raise ValueError(
+            "Draft adds network, subprocess, or environment access; manual review required."
+        )
+    return diff
+
+
 def _fail(incident_id: str, reason: str) -> dict:
     log_run(incident_id, "fixer", "error", None, error=reason)
     update_incident(incident_id, status="needs_human", pending={"error": reason})
@@ -180,29 +207,11 @@ def run_fix_draft(
         if new_content is None:
             return _fail(incident_id, f"Valid code could not be generated: {err}")
 
-    diff = "\n".join(
-        difflib.unified_diff(
-            original.splitlines(),
-            new_content.splitlines(),
-            "before",
-            "after",
-            lineterm="",
-        )
-    )
-
-    if not diff:
-        return _fail(incident_id, "Generated patch made no changes; manual review required.")
-
-    if len(diff.splitlines()) > MAX_DIFF_LINES:
-        return _fail(incident_id, "Diff exceeds maximum allowed lines; manual review required.")
-
-    validate(path, new_content, original)
-    if re.search(
-        r"(?im)^\+.*(?:import\s+(?:socket|subprocess|urllib)|from\s+(?:socket|subprocess|urllib)|"
-        r"(?:subprocess|socket|urllib|requests|httpx)\.|os\.(?:environ|getenv))",
-        diff,
-    ):
-        return _fail(incident_id, "Draft adds network, subprocess, or environment access; manual review required.")
+    try:
+        validate(path, new_content, original)
+        diff = _build_and_verify_diff(original, new_content)
+    except ValueError as e:
+        return _fail(incident_id, str(e))
 
     draft = {
         "ok": True,
@@ -287,27 +296,30 @@ def run_push(incident_id: str, analysis: dict, choice: str, draft: dict) -> str:
         update_incident(incident_id, status="pr_open", ci_status="success")
         return url
 
+    current_content = draft["new_content"]
     for retry_number in range(MAX_CI_FIX_RETRIES):
         failure_details = ci_res.get("failure_details", "CI checks failed")
         retry_prompt_input = {
             "root_cause": redact_untrusted_text(analysis["root_cause"]),
             "solution": redact_untrusted_text(str(sol)),
             "path": draft["path"],
-            "code": redact_untrusted_text(draft["new_content"]),
+            "code": redact_untrusted_text(current_content),
             "feedback": redact_untrusted_text(
                 f"GitHub CI checks failed on the PR with errors:\n{failure_details}\nPlease fix the errors."
             ),
         }
         try:
             retry_out = invoke_guarded(prompt | get_llm(), retry_prompt_input, incident_id)
-            retry_content = apply_hunks(draft["new_content"], retry_out.hunks)
-            validate(draft["path"], retry_content, draft["new_content"])
+            retry_content = apply_hunks(current_content, retry_out.hunks)
+            validate(draft["path"], retry_content, current_content)
+            _build_and_verify_diff(current_content, retry_content)
             retry_sha = update_branch_file(
                 draft["path"],
                 retry_content,
                 f"fix(ci): address test failures - {retry_out.commit_message}",
                 branch_name,
             )
+            current_content = retry_content
             ci_res = wait_for_ci_status(
                 retry_sha, timeout_seconds=CI_STATUS_TIMEOUT_SECONDS
             )
@@ -328,6 +340,7 @@ def run_push(incident_id: str, analysis: dict, choice: str, draft: dict) -> str:
             ci_status = "error"
             ci_res = {"failure_details": str(e)}
             log_run(incident_id, "fixer", "error", None, error=str(e))
+            break
 
     if ci_status != "success":
         details = ci_res.get("failure_details") or (
